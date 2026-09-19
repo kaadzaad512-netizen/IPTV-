@@ -417,6 +417,7 @@ package com.example.stalkeriptv
 
 import android.content.Intent
 import android.os.Bundle
+import androidx.compose.material3.CardDefaults
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
