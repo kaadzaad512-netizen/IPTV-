@@ -619,4 +619,133 @@ fun StalkerApp() {
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                 .clickable { playItem(item) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        ) {
+                            Text(
+                                text = item.name,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+EOF
+
+cat > "$PACKAGE_DIR/PlayerActivity.kt" <<'EOF'
+package com.example.stalkeriptv
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+
+class PlayerActivity : ComponentActivity() {
+
+    private var player: ExoPlayer? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val url = intent.getStringExtra("url") ?: ""
+        val title = intent.getStringExtra("title") ?: "Stream"
+
+        setContent {
+            PlayerScreen(url = url, title = title)
+        }
+    }
+
+    @Composable
+    private fun PlayerScreen(url: String, title: String) {
+        var errorMsg by remember { mutableStateOf<String?>(null) }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = true
+                        val exo = ExoPlayer.Builder(ctx).build()
+                        player = exo
+                        exo.setMediaItem(MediaItem.fromUri(url))
+                        exo.addListener(object : Player.Listener {
+                            override fun onPlayerError(error: PlaybackException) {
+                                errorMsg = error.errorCodeName + ": " +
+                                    (error.message ?: "unknown error")
+                            }
+                        })
+                        exo.prepare()
+                        exo.playWhenReady = true
+                    }
+                }
+            )
+
+            Text(
+                text = title,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(12.dp)
+            )
+
+            errorMsg?.let {
+                Text(
+                    text = it,
+                    color = Color.Red,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
+
+            DisposableEffect(Unit) {
+                onDispose {
+                    player?.release()
+                    player = null
+                }
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        player?.pause()
+    }
+
+    override fun onDestroy() {
+        player?.release()
+        player = null
+        super.onDestroy()
+    }
+}
+EOF
+
+echo "Project generated OK"
                
