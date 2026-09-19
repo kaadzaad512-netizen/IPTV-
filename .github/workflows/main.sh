@@ -7,8 +7,7 @@ PACKAGE_DIR="$PROJECT_DIR/app/src/main/java/com/example/stalkeriptv"
 rm -rf "$PROJECT_DIR"
 mkdir -p \
   "$PACKAGE_DIR" \
-  "$PROJECT_DIR/app/src/main/res/values" \
-  "$PROJECT_DIR/gradle"
+  "$PROJECT_DIR/app/src/main/res/values"
 
 cat > "$PROJECT_DIR/settings.gradle.kts" <<'EOF'
 import org.gradle.api.initialization.resolve.RepositoriesMode
@@ -61,8 +60,8 @@ android {
         applicationId = "com.example.stalkeriptv"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "3.0"
     }
 
     buildTypes {
@@ -173,8 +172,6 @@ cat > "$PROJECT_DIR/app/src/main/res/values/themes.xml" <<'EOF'
 </resources>
 EOF
 
-mkdir -p "$PACKAGE_DIR"
-
 cat > "$PACKAGE_DIR/StalkerRepository.kt" <<'EOF'
 package com.example.stalkeriptv
 
@@ -197,6 +194,12 @@ data class MediaItem(
     val name: String,
     val type: String,
     val cmd: String = ""
+)
+
+data class MediaPage(
+    val items: List<MediaItem>,
+    val page: Int,
+    val hasMore: Boolean
 )
 
 class StalkerRepository {
@@ -290,21 +293,34 @@ class StalkerRepository {
         throw lastError
     }
 
-    private fun parseItems(
+    fun getPage(
         session: StalkerSession,
         type: String,
-        action: String,
-        extra: Map<String, String> = emptyMap()
-    ): List<MediaItem> {
-        val params = mutableMapOf(
-            "type" to type,
-            "action" to action,
-            "JsHttpRequest" to "1-xml",
-            "token" to session.token
-        )
-        extra.forEach { (k, v) -> params[k] = v }
+        page: Int,
+        pageSize: Int = 30
+    ): MediaPage {
+        val action = when (type) {
+            "itv" -> "get_all_channels"
+            else -> "get_ordered_list"
+        }
 
-        val json = requestJson(session.portal, params, session)
+        val from = ((page - 1) * pageSize).coerceAtLeast(0)
+        val to = from + pageSize - 1
+
+        val json = requestJson(
+            session.portal,
+            mapOf(
+                "type" to type,
+                "action" to action,
+                "JsHttpRequest" to "1-xml",
+                "token" to session.token,
+                "p" to page.toString(),
+                "from" to from.toString(),
+                "to" to to.toString()
+            ),
+            session
+        )
+
         val js = json.optJSONObject("js") ?: JSONObject()
         val array = js.optJSONArray("data") ?: js.optJSONArray("items") ?: JSONArray()
 
@@ -324,17 +340,13 @@ class StalkerRepository {
             }
         }
 
-        return items.distinctBy { it.id }
+        val distinctItems = items.distinctBy { it.id }
+        return MediaPage(
+            items = distinctItems,
+            page = page,
+            hasMore = distinctItems.size >= pageSize
+        )
     }
-
-    fun getLiveChannels(session: StalkerSession): List<MediaItem> =
-        parseItems(session, "itv", "get_all_channels")
-
-    fun getVodList(session: StalkerSession): List<MediaItem> =
-        parseItems(session, "vod", "get_ordered_list")
-
-    fun getSeriesList(session: StalkerSession): List<MediaItem> =
-        parseItems(session, "series", "get_ordered_list")
 
     fun createLink(session: StalkerSession, item: MediaItem): String {
         val command = item.cmd.ifBlank {
@@ -365,12 +377,22 @@ class StalkerRepository {
             js.optString("link")
         ).firstOrNull { it.isNotBlank() }.orEmpty()
 
-        return raw
+        val streamUrl = raw
             .trim()
             .removePrefix("ffmpeg ")
             .removePrefix("vlc ")
-            .removePrefix("http ")
+            .removePrefix("Stream:")
             .trim()
+
+        val httpIndex = streamUrl.indexOf("http://").let {
+            if (it >= 0) it else streamUrl.indexOf("https://")
+        }
+
+        return if (httpIndex >= 0) {
+            streamUrl.substring(httpIndex).trim()
+        } else {
+            streamUrl
+        }
     }
 
     fun getMainInfo(session: StalkerSession): JSONObject? = try {
@@ -408,8 +430,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -425,7 +447,6 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -437,69 +458,51 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun StalkerApp() {
-    val repo = remember { StalkerRepository() }
+private fun StalkerApp() {
+    val repository = remember { StalkerRepository() }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var portal by remember { mutableStateOf("") }
     var mac by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-    var status by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(false) }
-    var tab by remember { mutableStateOf(0) }
     var search by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("Enter portal and MAC address") }
+
+    var selectedType by remember { mutableStateOf("itv") }
+    var page by remember { mutableStateOf(1) }
+    var hasNext by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
 
     var session by remember { mutableStateOf<StalkerSession?>(null) }
-    var items by remember { mutableStateOf(emptyList<MediaItem>()) }
+    var mediaItems by remember { mutableStateOf(emptyList<MediaItem>()) }
 
-    fun loadItems() {
+    fun loadPage(type: String = selectedType, requestedPage: Int = page) {
         scope.launch {
             loading = true
-            error = null
+            message = "Loading..."
 
             try {
-                val currentSession = withContext(Dispatchers.IO) {
-                    repo.connect(portal, mac)
+                val activeSession = session ?: withContext(Dispatchers.IO) {
+                    repository.connect(portal, mac)
                 }
 
-                val loadedItems = withContext(Dispatchers.IO) {
-                    when (tab) {
-                        0 -> repo.getLiveChannels(currentSession)
-                        1 -> repo.getVodList(currentSession)
-                        2 -> repo.getSeriesList(currentSession)
-                        else -> repo.getLiveChannels(currentSession)
-                    }
-                }
-
-                val expiry = withContext(Dispatchers.IO) {
-                    val js = repo.getMainInfo(currentSession)
-                    val keys = arrayOf(
-                        "expire_billing_date", "expire_date", "expire",
-                        "end_date", "end_time", "expired", "valid_to"
+                val result = withContext(Dispatchers.IO) {
+                    repository.getPage(
+                        session = activeSession,
+                        type = type,
+                        page = requestedPage
                     )
-                    var result = "unlimited/unknown"
-                    if (js != null) {
-                        val objs = mutableListOf<JSONObject>(js)
-                        js.optJSONObject("account")?.let { objs.add(it) }
-                        outer@ for (o in objs) {
-                            for (k in keys) {
-                                val v = o.optString(k).trim()
-                                if (v.isNotEmpty() && v != "0" && v != "null") {
-                                    result = v
-                                    break@outer
-                                }
-                            }
-                        }
-                    }
-                    result
                 }
 
-                session = currentSession
-                items = loadedItems
-                status = "Connected - expiry: $expiry - ${loadedItems.size} items"
-            } catch (e: Exception) {
-                error = e.message ?: "Request failed"
+                session = activeSession
+                selectedType = type
+                page = result.page
+                mediaItems = result.items
+                hasNext = result.hasMore
+
+                message = "${type.uppercase()} - Page ${result.page} - ${result.items.size} items"
+            } catch (error: Exception) {
+                message = error.message ?: "Request failed"
             } finally {
                 loading = false
             }
@@ -508,13 +511,13 @@ fun StalkerApp() {
 
     fun playItem(item: MediaItem) {
         val activeSession = session ?: return
+
         scope.launch {
             loading = true
-            error = null
 
             try {
                 val streamUrl = withContext(Dispatchers.IO) {
-                    repo.createLink(activeSession, item)
+                    repository.createLink(activeSession, item)
                 }
 
                 if (streamUrl.isBlank()) {
@@ -527,8 +530,8 @@ fun StalkerApp() {
                 }
 
                 context.startActivity(intent)
-            } catch (e: Exception) {
-                error = e.message ?: "Playback failed"
+            } catch (error: Exception) {
+                message = error.message ?: "Playback failed"
             } finally {
                 loading = false
             }
@@ -543,7 +546,7 @@ fun StalkerApp() {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
                     text = "Stalker IPTV",
@@ -554,82 +557,117 @@ fun StalkerApp() {
                     value = portal,
                     onValueChange = { portal = it },
                     label = { Text("Portal URL") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
                 )
 
                 OutlinedTextField(
                     value = mac,
                     onValueChange = { mac = it },
                     label = { Text("MAC address") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
                 )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Live", "VOD", "Series").forEachIndexed { index, label ->
-                        Button(
-                            onClick = {
-                                tab = index
-                                if (session != null) {
-                                    loadItems()
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(label)
-                        }
+                    Button(
+                        onClick = { loadPage("itv", 1) },
+                        enabled = !loading && portal.isNotBlank() && mac.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Live")
                     }
-                }
 
-                Button(
-                    onClick = { loadItems() },
-                    enabled = !loading && portal.isNotBlank() && mac.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (loading) "Loading..." else "Connect / Refresh")
-                }
+                    Button(
+                        onClick = { loadPage("vod", 1) },
+                        enabled = !loading && portal.isNotBlank() && mac.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("VOD")
+                    }
 
-                status?.let {
-                    Text(text = it, color = MaterialTheme.colorScheme.primary)
-                }
-
-                error?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
+                    Button(
+                        onClick = { loadPage("series", 1) },
+                        enabled = !loading && portal.isNotBlank() && mac.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Series")
+                    }
                 }
 
                 OutlinedTextField(
                     value = search,
                     onValueChange = { search = it },
                     label = { Text("Search") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
                 )
 
+                Text(text = message)
+
                 LazyColumn(
+                    modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(
-                        items = items.filter { it.name.contains(search, ignoreCase = true) },
+                        items = mediaItems.filter {
+                            it.name.contains(search, ignoreCase = true)
+                        },
                         key = { it.id }
                     ) { item ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                 .clickable { playItem(item) },
+                                .clickable { playItem(item) },
                             colors = CardDefaults.cardColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant
                             )
                         ) {
-                            Text(
-                                text = item.name,
+                            Column(
                                 modifier = Modifier.padding(16.dp)
-                            )
+                            ) {
+                                Text(
+                                    text = item.name,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text("Tap to play")
+                            }
                         }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (page > 1) {
+                                loadPage(selectedType, page - 1)
+                            }
+                        },
+                        enabled = !loading && page > 1
+                    ) {
+                        Text("Previous")
+                    }
+
+                    Text(
+                        text = "Page $page",
+                        modifier = Modifier.padding(top = 12.dp)
+                    )
+
+                    Button(
+                        onClick = {
+                            if (hasNext) {
+                                loadPage(selectedType, page + 1)
+                            }
+                        },
+                        enabled = !loading && hasNext
+                    ) {
+                        Text("Next")
                     }
                 }
             }
@@ -667,12 +705,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 
 class PlayerActivity : ComponentActivity() {
-
     private var player: ExoPlayer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         val url = intent.getStringExtra("url") ?: ""
         val title = intent.getStringExtra("title") ?: "Stream"
 
@@ -749,4 +785,3 @@ class PlayerActivity : ComponentActivity() {
 EOF
 
 echo "Project generated OK"
-               
