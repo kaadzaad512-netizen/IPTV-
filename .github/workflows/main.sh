@@ -171,10 +171,10 @@ cat > "$PROJECT_DIR/app/src/main/res/values/strings.xml" <<'EOF'
 EOF
 
 cat > "$PROJECT_DIR/app/src/main/res/values/themes.xml" <<'EOF'
+cat > "$PROJECT_DIR/app/src/main/res/values/themes.xml" <<'EOF'
 <resources>
-    <style name="Theme.StalkerIPTV" parent="Theme.Material3.DayNight.NoActionBar">
-        <item name="android:colorPrimary">#22C55E</item>
-        <item name="android:colorAccent">#22C55E</item>
+    <style name="Theme.StalkerIPTV" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0F172A</item>
         <item name="android:statusBarColor">#0F172A</item>
         <item name="android:navigationBarColor">#020817</item>
         <item name="android:windowLightStatusBar">false</item>
