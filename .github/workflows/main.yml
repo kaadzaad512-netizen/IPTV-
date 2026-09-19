@@ -31,7 +31,7 @@ jobs:
       run: chmod +x ./main.sh
 
     - name: Execute Shell Build Automation
-      run: ./main.sh
+      run: .github/workflows/main.sh
       env:
         STALKER_PORTAL_API: ${{ secrets.STALKER_PORTAL_API }}
 
