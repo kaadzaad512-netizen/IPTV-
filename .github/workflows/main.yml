@@ -23,6 +23,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - name: Generate Android project
         run: bash .github/workflows/main.sh
@@ -34,10 +35,11 @@ jobs:
 
       - name: Build debug APK
         working-directory: StalkerIPTV
-        run: gradle --no-daemon assembleDebug
+        run: gradle --no-daemon --stacktrace assembleDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: stalker-iptv-debug-apk
           path: StalkerIPTV/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
