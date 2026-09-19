@@ -25,7 +25,7 @@ jobs:
           java-version: "17"
 
       - name: Generate Android project
-        run: bash .github/scripts/main.sh
+        run: bash .github/workflows/main.sh
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
