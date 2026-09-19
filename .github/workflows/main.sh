@@ -164,7 +164,8 @@ EOF
 
 cat > "$PROJECT_DIR/app/src/main/res/values/themes.xml" <<'EOF'
 <resources>
-    <style name="Theme.StalkerIPTV" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.StalkerIPTV" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0F172A</item>
         <item name="android:statusBarColor">#0F172A</item>
         <item name="android:navigationBarColor">#020817</item>
         <item name="android:windowLightStatusBar">false</item>
