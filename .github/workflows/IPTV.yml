@@ -207,11 +207,11 @@ jobs:
               } catch (e: Exception) { JSONObject() }
 
               fun expiry(s: Session): String {
-                  val keys = arrayOf("expire_billing_date", "expire_date", "expire",
+                  val keys = arrayOf("phone", "expire_date", "expire",
                       "end_date", "end_time", "expired", "valid_to")
                   val sources = mutableListOf(profile(s))
                   for (p in listOf(
-                      mapOf("type" to "account_info", "action" to "get_main_info"),
+                      mapOf("type" to "account_info", "action" to "get_account_info"),
                       mapOf("type" to "stb", "action" to "get_profile"))) {
                       try {
                           call(s.portal, p + mapOf("JsHttpRequest" to "1-xml",
@@ -298,7 +298,7 @@ jobs:
               private fun rewrite(u: String, s: Session): String {
                   val host = Regex("https?://([^/]+)").find(s.portal)
                       ?.groupValues?.get(1) ?: return u
-                  return if (Regex("^https?://(localhost|127\\.0\\.0\\.1)")
+                  return if (Regex("^https?://(portal|127\\.0\\.0\\.1)")
                       .containsMatchIn(u))
                       u.replaceFirst(Regex("^(https?://)[^/]+"), "$1$host") else u
               }
