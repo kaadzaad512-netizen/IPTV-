@@ -369,6 +369,8 @@ jobs:
           }
           XEOF
 
+          
+              
           cat > app/src/main/java/com/stb/iptv/MainActivity.kt <<'XEOF'
           package com.stb.iptv
 
@@ -433,16 +435,17 @@ jobs:
 
               fun connect() {
                   scope.launch {
-                      loading = true; error = null; status0 = "connecting..."
+                      loading = true; error = null; status = "connecting..."
                       try {
-                          val s = withContext(Dispatchers.IO) { repo.connect(portal, mac) }
+                          val s = withContext(Dispatchers.IO) {
+                              repo.connect(portal, mac) }
                           repo.getProfile(s)
                           val exp = withContext(Dispatchers.IO) { repo.expiry(s) }
                           session = s
-                          status0 = "MAC: ${'$'}{s.mac} - expiry: ${'$'}exp"
+                          status = "MAC: ${s.mac} - expiry: $exp"
                           items = withContext(Dispatchers.IO) { repo.channels(s) }
                           genreNames = withContext(Dispatchers.IO) { repo.genres(s) }
-                          status0 = "${'$'}{items.size} channels, ${'$'}{genreNames.size} genres"
+                          status = "${items.size} channels, ${genreNames.size} genres"
                       } catch (e: Exception) { error = e.message }
                       finally { loading = false }
                   }
@@ -451,13 +454,13 @@ jobs:
               fun scan() {
                   scope.launch {
                       loading = true; hits = emptyList(); error = null
-                      status0 = "scanning..."
+                      status = "scanning..."
                       withContext(Dispatchers.IO) {
                           MacScanner.scan(repo, portal, prefix,
                               count.toIntOrNull() ?: 50, 8,
                               onHit = { h -> scope.launch { hits = hits + h } },
                               onDone = { n -> scope.launch {
-                                  status0 = "scan done: ${'$'}n hits"; loading = false } })
+                                  status = "scan done: $n hits"; loading = false } })
                       }
                   }
               }
@@ -466,7 +469,7 @@ jobs:
                   val s = session ?: return
                   scope.launch {
                       loading = true; error = null
-                      status0 = "resolving ${'$'}{item.name}..."
+                      status = "resolving ${item.name}..."
                       try {
                           val url = withContext(Dispatchers.IO) {
                               repo.createLink(s, item) }
@@ -475,19 +478,18 @@ jobs:
                           ctx.startActivity(Intent(ctx, PlayerActivity::class.java)
                               .apply { putExtra("url", url)
                                        putExtra("title", item.name) })
-                          status0 = "playing ${'$'}{item.name}"
+                          status = "playing ${item.name}"
                       } catch (e: Exception) { error = e.message }
                       finally { loading = false }
                   }
               }
 
-              var status0 by remember { mutableStateOf("idle") }
-
               Column(Modifier.fillMaxSize().padding(14.dp),
                   verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                  Text("STB Player Pro", style = MaterialTheme.typography
-                      .headlineSmall, color = Accent)
-                  Text(status0, color = Color(0xFF8A8F98),
+                  Text("STB Player Pro",
+                      style = MaterialTheme.typography.headlineSmall,
+                      color = Accent)
+                  Text(status, color = Color(0xFF8A8F98),
                       style = MaterialTheme.typography.bodySmall)
                   error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
@@ -507,7 +509,8 @@ jobs:
                       OutlinedTextField(count, { count = it },
                           label = { Text("Count") },
                           modifier = Modifier.weight(1f), singleLine = true)
-                      Button({ scan() }, enabled = !loading && portal.isNotBlank(),
+                      Button({ scan() },
+                          enabled = !loading && portal.isNotBlank(),
                           modifier = Modifier.height(56.dp)) { Text("Scan") }
                   }
 
@@ -516,8 +519,7 @@ jobs:
                           style = MaterialTheme.typography.labelMedium)
                       LazyColumn(Modifier.height(110.dp)) {
                           items(hits) { h ->
-                              Text("${'$'}{h.mac}  (${ '$'}{h.expiry})",
-                                  color = Color.White,
+                              Text("${h.mac}  (${h.expiry})", color = Color.White,
                                   modifier = Modifier.fillMaxWidth()
                                       .clickable { mac = h.mac; connect() }
                                       .padding(vertical = 6.dp))
@@ -531,11 +533,10 @@ jobs:
 
                   LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                       items(items.filter { it.name.contains(search, true) }) { item ->
-                          Card(Modifier.fillMaxWidth()
-                              .clickable { play(item) }) {
+                          Card(Modifier.fillMaxWidth().clickable { play(item) }) {
                               Column(Modifier.padding(14.dp)) {
                                   Text(item.name, color = Color.White)
-                                  Text("#${'$'}{item.num}  ${'$'}{genreNames[item.genre] ?: \"\"}",
+                                  Text("#${item.num}  ${genreNames[item.genre] ?: ""}",
                                       color = Color(0xFF8A8F98),
                                       style = MaterialTheme.typography.labelSmall)
                               }
