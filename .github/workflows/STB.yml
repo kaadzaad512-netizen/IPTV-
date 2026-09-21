@@ -1,48 +1,48 @@
-name: Build APK
 
-on: workflow_dispatch
+name: Build Stalker IPTV APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
+          java-version: '17'
 
-      - name: Generate project
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ---------------- PART 1: Project skeleton, Gradle files, Repository ----------------
+      - name: Generate project (part 1 - skeleton + repository)
         run: |
-          mkdir -p app/src/main/java/com/stb/iptv \
-                   app/src/main/res/values app/src/main/res/drawable
+          mkdir -p app/src/main/java/com/stb/iptv
+          mkdir -p app/src/main/res/values
 
           cat > settings.gradle.kts <<'XEOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
           }
           dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories { google(); mavenCentral() }
           }
-          rootProject.name = "StalkerIPTV"
+          rootProject.name = "stb-iptv"
           include(":app")
           XEOF
 
           cat > build.gradle.kts <<'XEOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.0" apply false
           }
-          XEOF
-
-          cat > gradle.properties <<'XEOF'
-          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
-          android.useAndroidX=true
-          android.nonTransitiveRClass=true
           XEOF
 
           cat > app/build.gradle.kts <<'XEOF'
@@ -57,356 +57,246 @@ jobs:
                   applicationId = "com.stb.iptv"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "3.1"
+                  versionCode = 1
+                  versionName = "1.0"
               }
-              buildTypes { release { isMinifyEnabled = false } }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
               }
               kotlinOptions { jvmTarget = "17" }
-              buildFeatures { compose = true }
-              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
           }
           dependencies {
-              implementation("androidx.core:core-ktx:1.13.1")
-              implementation("androidx.activity:activity-compose:1.9.0")
-              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+              implementation(composeBom)
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")
+              implementation("androidx.core:core-ktx:1.13.1")
               implementation("com.squareup.okhttp3:okhttp:4.12.0")
-              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-              implementation("androidx.media3:media3-exoplayer:1.4.1")
-              implementation("androidx.media3:media3-ui:1.4.1")
-              implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
-              implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
-              implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
-              implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
+              implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+              implementation("androidx.media3:media3-exoplayer:1.3.1")
+              implementation("androidx.media3:media3-ui:1.3.1")
+              implementation("androidx.media3:media3-datasource-okhttp:1.3.1")
           }
           XEOF
 
           cat > app/src/main/AndroidManifest.xml <<'XEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.INTERNET"/>
               <application
-                  android:label="STB Player Pro"
+                  android:label="STB IPTV"
                   android:usesCleartextTraffic="true"
-                  android:theme="@style/Theme.App">
-                  <activity android:name=".PlayerActivity"
-                      android:screenOrientation="landscape"
-                      android:configChanges="orientation|screenSize"
-                      android:exported="false" />
+                  android:theme="@android:style/Theme.Material.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
+                  <activity android:name=".PlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden"/>
               </application>
           </manifest>
           XEOF
 
           cat > app/src/main/res/values/themes.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <style name="Theme.App" parent="android:Theme.Material.NoActionBar">
-                  <item name="android:windowBackground">#0B1020</item>
-                  <item name="android:statusBarColor">#0B1020</item>
-                  <item name="android:windowLightStatusBar">false</item>
-              </style>
+              <style name="AppTheme" parent="android:Theme.Material.NoActionBar"/>
           </resources>
           XEOF
 
-          cat > app/src/main/res/drawable/bg.xml <<'XEOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android">
-              <gradient android:angle="270" android:startColor="#0B1020"
-                  android:centerColor="#101A33" android:endColor="#0B1020" />
-          </shape>
-          XEOF
-
-                    cat > app/src/main/java/com/stb/iptv/StalkerRepository.kt <<'XEOF'
+          cat > app/src/main/java/com/stb/iptv/Repository.kt <<'XEOF'
           package com.stb.iptv
 
-          import okhttp3.HttpUrl.Companion.toHttpUrl
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import kotlinx.serialization.json.*
           import okhttp3.OkHttpClient
           import okhttp3.Request
-          import org.json.JSONObject
-          import java.io.IOException
-          import java.text.SimpleDateFormat
-          import java.util.Date
-          import java.util.Locale
-          import java.util.concurrent.TimeUnit
+          import java.net.URLEncoder
 
-          data class Session(val portal: String, val token: String, val mac: String)
-          data class MediaItem(val id: String, val name: String, val type: String,
-                               val group: String = "", val cmd: String = "")
-          data class PagedResult(val items: List<MediaItem>, val page: Int,
-                                 val totalPages: Int)
+          data class Channel(val id: String, val name: String, val num: Int, val cmd: String)
+          data class Vod(val id: String, val name: String, val cmd: String, val type: String)
+          data class Episode(val id: String, val name: String, val cmd: String)
 
-          class StalkerRepository {
-              private val http = OkHttpClient.Builder()
-                  .connectTimeout(15, TimeUnit.SECONDS)
-                  .readTimeout(30, TimeUnit.SECONDS).build()
+          class Repository(private val client: OkHttpClient) {
 
-              private val ua = "Mozilla/5.0 (QtEmbedded; U; Linux; C) " +
-                  "AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 " +
-                  "rev: 250 Safari/533.3"
+              private lateinit var base: String
+              private lateinit var mac: String
+              private var tokenCookie: String = ""
+              var expiry: String? = null
+                  private set
 
-              fun normalizeMac(raw: String): String? {
-                  val v = raw.filter { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
-                      .uppercase()
-                  return if (v.length == 12) v.chunked(2).joinToString(":") else null
-              }
+              private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-              fun baseUrl(portal: String): String =
-                  Regex("^(https?://[^/]+)").find(portal.trim())
-                      ?.groupValues?.get(1) ?: portal.trim().trimEnd('/')
+              private val portalHeaders = mapOf(
+                  "Referer" to "",
+                  "X-User-Agent" to "Model: MAG250; Link: WiFi",
+                  "User-Agent" to "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3"
+              )
 
-              private fun urls(portal: String) = portal.trim().trimEnd('/').let { c ->
-                  if (c.endsWith("/portal.php")) listOf(c) else listOf(
-                      "$c/c/portal.php", "$c/portal.php", "$c/server/load.php"
-                  ).distinct()
-              }
-
-              fun call(url: String, params: Map<String, String>, s: Session? = null): JSONObject {
-                  val u = url.toHttpUrl().newBuilder().apply {
-                      params.forEach { (k, v) -> addQueryParameter(k, v) }
-                  }.build()
-                  val rb = Request.Builder().url(u)
-                      .header("User-Agent", ua)
-                      .header("X-User-Agent", "Model: MAG254; Link: Ethernet")
-                      .header("Accept", "*/*")
-                  if (s != null) {
-                      rb.header("Authorization", "Bearer ${s.token}")
-                      rb.header("Cookie", "mac=${s.mac}; stb_lang=en; timezone=UTC")
-                  }
-                  http.newCall(rb.build()).execute().use { r ->
-                      val body = r.body?.string().orEmpty()
-                      if (!r.isSuccessful || body.isBlank()) throw IOException("HTTP ${r.code}")
-                      return JSONObject(body)
+              private fun call(type: String, action: String, vararg params: Pair<String, String>): JsonObject {
+                  val sb = StringBuilder("$base portal.php?type=$type&action=$action")
+                  params.forEach { (k, v) -> sb.append("&").append(k).append("=").append(enc(v)) }
+                  sb.append("&JsHttpRequest=1-xml")
+                  val rb = Request.Builder().url(sb.toString())
+                      .header("Cookie", tokenCookie.ifBlank { "mac=$mac; stb_lang=en; timezone=Europe/London" })
+                      .header("Referer", base)
+                      .header("X-User-Agent", portalHeaders["X-User-Agent"]!!)
+                      .header("User-Agent", portalHeaders["User-Agent"]!!)
+                      .get()
+                  client.newCall(rb.build()).execute().use { r ->
+                      val body = r.body?.string() ?: throw Exception("empty response")
+                      return Json.parseToJsonElement(body).jsonObject
                   }
               }
 
-              fun connect(portal: String, rawMac: String): Session {
-                  val mac = normalizeMac(rawMac)
-                      ?: throw IllegalArgumentException("Invalid MAC")
-                  var last: Exception = IOException("handshake failed")
-                  for (u in urls(portal)) {
-                      try {
-                          val js = call(u, mapOf(
-                              "type" to "stb", "action" to "handshake", "token" to "",
-                              "JsHttpRequest" to "1-xml", "mac" to mac)
-                          ).optJSONObject("js")
-                          val tok = js?.optString("token").orEmpty()
-                              .substringBefore("~").trim()
-                          if (tok.isNotEmpty()) return Session(u, tok, mac)
-                      } catch (e: Exception) { last = e }
+              suspend fun login(url: String, macAddress: String): JsonObject =
+                  withContext(Dispatchers.IO) {
+                      base = if (url.endsWith("/c/")) url else url.trimEnd('/') + "/c/"
+                      mac = macAddress
+                      val hs = call("handshake", "get_token")
+                      val token = hs["token"]?.jsonPrimitive?.contentOrNull
+                          ?: throw Exception("handshake failed")
+                      tokenCookie = "mac=$mac; stb_lang=en; timezone=Europe/London; Bearer=$token"
+                      val prof = call("profile", "get_profile")
+                      expiry = extractExpiry(prof)
+                      prof
                   }
-                  throw last
+
+              private fun extractExpiry(prof: JsonObject): String? {
+                  val candidates = listOfNotNull(
+                      prof,
+                      prof["account"] as? JsonObject,
+                      (prof["results"] as? JsonObject)?.let {
+                          (it["account"] as? JsonObject) ?: it
+                      },
+                      prof["js"] as? JsonObject
+                  )
+                  for (o in candidates) {
+                      for (key in listOf("expire_billing_date", "expire", "expires",
+                              "expiration_date", "end_date")) {
+                          val v = o[key]?.jsonPrimitive?.contentOrNull ?: continue
+                          if (v.isNotBlank() && v != "null") return v
+                      }
+                  }
+                  return null
               }
 
-              private fun profile(s: Session): JSONObject = try {
-                  call(s.portal, mapOf("type" to "stb", "action" to "get_profile",
-                      "JsHttpRequest" to "1-xml"), s).optJSONObject("js") ?: JSONObject()
-              } catch (e: Exception) { JSONObject() }
+              private inline fun JsonObject.maxPage(): Int {
+                  val mp = this["max_page"]?.jsonPrimitive?.intOrNull
+                      ?: this["total_pages"]?.jsonPrimitive?.intOrNull ?: 1
+                  return mp.coerceAtLeast(1)
+              }
 
-              fun expiry(s: Session): String {
-                  val keys = listOf("expire_billing_date", "expire_date", "expire",
-                      "expire_at", "end_date", "end_time", "valid_to", "expired")
-                  val sources = mutableListOf(profile(s))
-                  for (p in listOf(
-                      mapOf("type" to "account_info", "action" to "get_main_info"),
-                      mapOf("type" to "account_info", "action" to "get_account_info"))) {
-                      try {
-                          call(s.portal, p + mapOf("JsHttpRequest" to "1-xml"),
-                              s).optJSONObject("js")?.let { sources.add(it) }
-                      } catch (_: Exception) {}
+              private inline fun paginate(action: String, type: String,
+                                          block: (JsonArray) -> Unit) {
+                  var page = 1
+                  while (true) {
+                      val j = call(type, action, "p" to page.toString())
+                      val data = j["data"]?.jsonArray ?: break
+                      if (data.isEmpty()) break
+                      block(data)
+                      if (page >= j.maxPage()) break
+                      page++
+                      Thread.sleep(150)
                   }
-                  val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-                  for (js in sources) {
-                      for (obj in listOfNotNull(js, js.optJSONObject("account"),
-                              js.optJSONObject("data"))) {
-                          for (k in keys) {
-                              if (!obj.has(k)) continue
-                              val v = obj.optString(k).trim()
-                              if (v.isEmpty() || v == "0" || v == "null" || v == "-1" ||
-                                  v.startsWith("0000")) continue
-                              if (v.matches(Regex("\\d{9,13}"))) {
-                                  var ts = v.toLong()
-                                  if (ts > 100000000000L) ts /= 1000
-                                  if (ts < 100000000L) continue
-                                  val d = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
-                                      .format(Date(ts * 1000))
-                                  return if (ts * 1000 < System.currentTimeMillis())
-                                      "$d (EXPIRED)" else d
-                              }
-                              if (v.length >= 10) {
-                                  val d = v.substring(0, 10)
-                                  return if (d < today) "$d (EXPIRED)" else d
-                              }
+              }
+
+              // FULL channel list — all pages
+              suspend fun allChannels(): List<Channel> = withContext(Dispatchers.IO) {
+                  val out = mutableListOf<Channel>()
+                  paginate("get_all_channels", "itv") { data ->
+                      for (ch in data) {
+                          val o = ch.jsonObject
+                          val cmd = o["cmd"]?.jsonPrimitive?.contentOrNull ?: continue
+                          out.add(Channel(
+                              id = o["id"]?.jsonPrimitive?.content ?: "",
+                              name = o["name"]?.jsonPrimitive?.content ?: "",
+                              num = o["number"]?.jsonPrimitive?.intOrNull ?: 0,
+                              cmd = cmd))
+                      }
+                  }
+                  out
+              }
+
+              // FULL VOD + series list — all pages
+              suspend fun allVod(): List<Vod> = withContext(Dispatchers.IO) {
+                  val out = mutableListOf<Vod>()
+                  paginate("get_ordered_list", "vod") { data ->
+                      for (v in data) {
+                          val o = v.jsonObject
+                          val isSeries = o["cmd"] == null ||
+                              o["series"]?.jsonArray?.isNotEmpty() == true
+                          out.add(Vod(
+                              id = o["id"]?.jsonPrimitive?.content ?: "",
+                              name = o["name"]?.jsonPrimitive?.content ?: "",
+                              cmd = o["cmd"]?.jsonPrimitive?.contentOrNull ?: "",
+                              type = if (isSeries) "series" else "vod"))
+                      }
+                  }
+                  out
+              }
+
+              // FULL episode list for a series — all pages, seasons flattened
+              suspend fun allEpisodes(seriesId: String): List<Episode> =
+                  withContext(Dispatchers.IO) {
+                      val out = mutableListOf<Episode>()
+                      paginate("get_episodes", "series") { data ->
+                          for (e in data) {
+                              val o = e.jsonObject
+                              val cmd = o["cmd"]?.jsonPrimitive?.contentOrNull ?: continue
+                              val season = o["season_number"]?.jsonPrimitive?.intOrNull ?: 1
+                              val ep = o["episode_number"]?.jsonPrimitive?.intOrNull
+                                  ?: o["num"]?.jsonPrimitive?.intOrNull ?: 0
+                              out.add(Episode(
+                                  id = o["id"]?.jsonPrimitive?.content ?: "",
+                                  name = "S%02d E%02d - %s".format(
+                                      season, ep, o["name"]?.jsonPrimitive?.content ?: ""),
+                                  cmd = cmd))
                           }
                       }
+                      out
                   }
-                  return "unlimited / unknown"
-              }
 
-              private fun paged(s: Session, type: String, action: String, page: Int = 1,
-                                search: String = "", genre: String = "0",
-                                extra: Map<String, String> = emptyMap()): PagedResult {
-                  val p = mutableMapOf("type" to type, "action" to action,
-                      "JsHttpRequest" to "1-xml", "p" to page.toString(),
-                      "genre" to genre, "fav" to "0")
-                  if (search.isNotBlank()) p["search"] = search
-                  p.putAll(extra)
-                  val json = try { call(s.portal, p, s) } catch (e: Exception) {
-                      return PagedResult(emptyList(), page, 1) }
-                  val js = json.optJSONObject("js")
-                      ?: return PagedResult(emptyList(), page, 1)
-                  val arr = js.optJSONArray("data")
-                      ?: return PagedResult(emptyList(), page, 1)
-                  val out = mutableListOf<MediaItem>()
-                  for (i in 0 until arr.length()) {
-                      val o = arr.optJSONObject(i) ?: continue
-                      val id = o.optString("id").ifBlank {
-                          o.optString("ch_id").ifBlank { o.optString("series_id") } }
-                      if (id.isBlank()) continue
-                      var nm = o.optString("name").ifBlank { o.optString("title") }
-                          .ifBlank { o.optString("o_name") }
-                      val num = o.optString("num")
-                      if (nm.isBlank() && num.isNotBlank()) nm = "Episode $num"
-                      if (nm.isBlank()) nm = "Untitled"
-                      out.add(MediaItem(id, nm, type, o.optString("tv_genre_id", ""),
-                          o.optString("cmd", "")))
-                  }
-                  val tp = if (js.has("total_pages")) js.optInt("total_pages", 1)
-                           else js.optInt("max_page", 1)
-                  return PagedResult(out.distinctBy { it.id }, page,
-                      if (tp < 1) 1 else tp)
-              }
-
-              fun live(s: Session): List<MediaItem> =
-                  paged(s, "itv", "get_all_channels",
-                      extra = mapOf("force_all" to "1")).items.ifEmpty {
-                  paged(s, "itv", "get_ordered_list",
-                      extra = mapOf("sortby" to "number")).items.ifEmpty {
-                      var pg = 1; val acc = mutableListOf<MediaItem>()
-                      while (pg < 40) {
-                          val r = paged(s, "itv", "get_ordered_list", pg,
-                              extra = mapOf("sortby" to "number"))
-                          if (r.items.isEmpty()) break
-                          acc += r.items; pg++
+              // create_link for VOD / series / channel playback
+              suspend fun createLink(cmd: String, type: String, itemId: String): String =
+                  withContext(Dispatchers.IO) {
+                      val j = when (type) {
+                          "vod" -> call("vod", "create_link", "cmd" to cmd)
+                          "series" -> call("vod", "create_link", "cmd" to cmd,
+                              "series_id" to itemId)
+                          else -> call("itv", "create_link", "cmd" to cmd)
                       }
-                      acc
+                      val js = j["js"] as? JsonObject
+                      (js?.get("cmd")?.jsonPrimitive?.contentOrNull ?: j["cmd"]
+                          ?.jsonPrimitive?.contentOrNull
+                          ?: throw Exception("no link returned"))
                   }
-              }
 
-              fun vod(s: Session, page: Int = 1, search: String = "") =
-                  paged(s, "vod", "get_ordered_list", page, search)
-
-              fun series(s: Session, page: Int = 1, search: String = "") =
-                  paged(s, "series", "get_ordered_list", page, search)
-
-              fun episodes(s: Session, seriesId: String): List<MediaItem> {
-                  val out = mutableListOf<MediaItem>()
-                  var pg = 1; var tp = 1
-                  while (pg <= tp && pg <= 25) {
-                      val r = paged(s, "series", "get_series", pg,
-                          extra = mapOf("series_id" to seriesId,
-                              "sortby" to "number"))
-                      if (r.items.isEmpty()) break
-                      out += r.items
-                      tp = r.totalPages
-                      pg++
-                  }
-                  return out.map { it.copy(type = "vod") }
-              }
-
-              fun stream(s: Session, it: MediaItem): String {
-                  val base = baseUrl(s.portal)
-                  if (it.type == "itv") {
-                      return "$base/play/live.php?mac=${s.mac}&stream=${it.id}" +
-                          "&extension=ts&play_token=${s.token}"
-                  }
-                  Regex("https?://\\S+").find(it.cmd)?.value
-                      ?.let { return rewrite(it, s) }
-                  if (it.cmd.isNotBlank()) {
-                      for (t in listOf(it.type, "vod").distinct()) {
-                          try {
-                              val js = call(s.portal, mapOf(
-                                  "type" to t, "action" to "create_link",
-                                  "JsHttpRequest" to "1-xml",
-                                  "cmd" to it.cmd,
-                                  "forced_storage" to "undefined",
-                                  "disable_ad" to "0"), s
-                              ).optJSONObject("js")
-                              var u = js?.optString("cmd", js.optString("url")).orEmpty()
-                              if (u.isNotBlank()) {
-                                  u = u.replace(Regex(
-                                      "^(ffrt\\d*\\s+|ffmpeg\\s+|mpv\\s+|http\\s+)"),
-                                      "").trim()
-                                  if (u.startsWith("http")) return rewrite(u, s)
-                              }
-                          } catch (_: Exception) {}
-                      }
-                  }
-                  return if (it.type == "series")
-                      "$base/play/series.php?mac=${s.mac}&stream=${it.id}" +
-                          "&extension=mp4&play_token=${s.token}"
-                  else
-                      "$base/play/vod.php?mac=${s.mac}&stream=${it.id}" +
-                          "&extension=mp4&play_token=${s.token}"
-              }
-
-              private fun rewrite(u: String, s: Session): String {
-                  val host = Regex("https?://([^/]+)").find(s.portal)
-                      ?.groupValues?.get(1) ?: return u
-                  return if (Regex("^https?://(portal|127\\.0\\.0\\.1|localhost)")
-                      .containsMatchIn(u))
-                      u.replaceFirst(Regex("^(https?://)[^/]+"), "$1$host") else u
+              // convert cmd to direct URL
+              fun toUrl(cmd: String): String = when {
+                  cmd.startsWith("ffmpeg ") ->
+                      cmd.removePrefix("ffmpeg ").trim().split(" ").last()
+                  cmd.startsWith("http") -> cmd
+                  else -> throw Exception("unsupported cmd: $cmd")
               }
           }
           XEOF
 
-          cat > app/src/main/java/com/stb/iptv/MacScanner.kt <<'XEOF'
-          package com.stb.iptv
+          echo "part 1 done"
 
-          import java.util.concurrent.ConcurrentLinkedQueue
-          import java.util.concurrent.CountDownLatch
-          import kotlin.random.Random
-
-          data class Hit(val mac: String, val expiry: String)
-
-          object MacScanner {
-              fun scan(repo: StalkerRepository, portal: String, prefix: String,
-                       count: Int, threads: Int, onHit: (Hit) -> Unit,
-                       onDone: (Int) -> Unit) {
-                  val macs = ConcurrentLinkedQueue<String>()
-                  repeat(count) {
-                      macs.add("$prefix:%02X:%02X:%02X".format(
-                          Random.nextInt(256), Random.nextInt(256),
-                          Random.nextInt(256)))
-                  }
-                  val latch = CountDownLatch(threads)
-                  repeat(threads) {
-                      Thread {
-                          while (true) {
-                              val mac = macs.poll() ?: break
-                              try {
-                                  val s = repo.connect(portal, mac)
-                                  onHit(Hit(s.mac, repo.expiry(s)))
-                              } catch (_: Exception) {}
-                          }
-                          latch.countDown()
-                      }.start()
-                  }
-                  Thread { latch.await(); onDone(count - macs.size) }.start()
-              }
-          }
-          XEOF
-
-                    cat > app/src/main/java/com/stb/iptv/MainActivity.kt <<'XEOF'
+      # ---------------- PART 2: MainActivity (login, channels, VOD, series UI) ----------------
+      - name: Generate project (part 2 - main UI)
+        run: |
+          cat > app/src/main/java/com/stb/iptv/MainActivity.kt <<'XEOF'
           package com.stb.iptv
 
           import android.content.Intent
@@ -422,288 +312,192 @@ jobs:
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
-          import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.platform.LocalContext
-          import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.*
           import kotlinx.coroutines.Dispatchers
-          import kotlinx.coroutines.launch
-          import kotlinx.coroutines.withContext
-
-          val Bg1 = Color(0xFF0B1020); val Bg2 = Color(0xFF101A33)
-          val Accent = Color(0xFF22C55E)
 
           class MainActivity : ComponentActivity() {
+              private val scope = CoroutineScope(Dispatchers.Main)
+              private lateinit var repo: Repository
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  setContent {
-                      MaterialTheme(colorScheme = darkColorScheme(
-                          primary = Accent, background = Bg1, surface = Bg1)) {
-                          Surface(Modifier.fillMaxSize()) {
-                              Column(Modifier.fillMaxSize().background(Brush
-                                  .verticalGradient(listOf(Bg1, Bg2, Bg1)))) {
-                                  MainScreen()
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun MainScreen() {
-              val repo = remember { StalkerRepository() }
-              val ctx = LocalContext.current
-              val scope = rememberCoroutineScope()
-
-              var portal by remember { mutableStateOf("") }
-              var mac by remember { mutableStateOf("") }
-              var prefix by remember { mutableStateOf("00:1A:79") }
-              var count by remember { mutableStateOf("50") }
-              var status by remember { mutableStateOf("idle") }
-              var error by remember { mutableStateOf<String?>(null) }
-              var loading by remember { mutableStateOf(false) }
-              var tab by remember { mutableStateOf(0) }
-              var search by remember { mutableStateOf("") }
-              var jump by remember { mutableStateOf("") }
-              var session by remember { mutableStateOf<Session?>(null) }
-              var expiryInfo by remember { mutableStateOf("") }
-              var items by remember { mutableStateOf(listOf<MediaItem>()) }
-              var hits by remember { mutableStateOf(listOf<Hit>()) }
-              var page by remember { mutableStateOf(1) }
-              var totalPages by remember { mutableStateOf(1) }
-              var dialogTitle by remember { mutableStateOf("") }
-              var dialogEpisodes by remember { mutableStateOf<List<MediaItem>?>(null) }
-
-              fun load(p: Int) {
-                  val s = session ?: return
-                  scope.launch {
-                      loading = true; error = null
-                      try {
-                          if (tab == 0) {
-                              items = withContext(Dispatchers.IO) { repo.live(s) }
-                              page = 1; totalPages = 1
-                              status = "${items.size} live channels"
-                          } else {
-                              val r = withContext(Dispatchers.IO) {
-                                  if (tab == 1) repo.vod(s, p, search.trim())
-                                  else repo.series(s, p, search.trim())
-                              }
-                              items = r.items; page = r.page; totalPages = r.totalPages
-                              status = (if (tab == 1) "VOD" else "Series") +
-                                  " - page $page / $totalPages" +
-                                  if (items.isEmpty()) " (no items)" else ""
-                          }
-                      } catch (e: Exception) { error = e.message }
-                      finally { loading = false }
-                  }
+                  repo = Repository(okhttp3.OkHttpClient())
+                  setContent { MaterialTheme(colorScheme = darkColorScheme()) { App() } }
               }
 
-              fun playUrl(url: String, name: String) {
-                  if (url.isBlank())
-                      throw IllegalStateException("could not resolve stream URL")
-                  ctx.startActivity(Intent(ctx, PlayerActivity::class.java)
-                      .apply { putExtra("url", url)
-                               putExtra("title", name) })
-                  status = "playing $name"
-              }
+              @Composable
+              private fun App() {
+                  var portalUrl by remember { mutableStateOf("") }
+                  var mac by remember { mutableStateOf("00:1A:79:00:00:00") }
+                  var loggedIn by remember { mutableStateOf(false) }
+                  var loading by remember { mutableStateOf(false) }
+                  var error by remember { mutableStateOf<String?>(null) }
+                  var expiry by remember { mutableStateOf<String?>(null) }
+                  var channels by remember { mutableStateOf<List<Channel>>(emptyList()) }
+                  var vods by remember { mutableStateOf<List<Vod>>(emptyList()) }
+                  var tab by remember { mutableIntStateOf(0) } // 0=tv 1=vod 2=series
+                  var dialogEpisodes by remember { mutableStateOf<String?>(null) }
+                  var eps by remember { mutableStateOf<List<Episode>>(emptyList()) }
 
-              fun openItem(item: MediaItem) {
-                  val s = session ?: return
-                  scope.launch {
-                      loading = true; error = null
-                      status = "opening ${item.name}..."
-                      try {
-                          if (item.type == "series") {
-                              val eps = withContext(Dispatchers.IO) {
-                                  repo.episodes(s, item.id) }
-                              if (eps.isEmpty())
-                                  throw IllegalStateException("no episodes found")
-                              dialogTitle = item.name
-                              dialogEpisodes = eps
-                          } else {
-                              val url = withContext(Dispatchers.IO) {
-                                  repo.stream(s, item) }
-                              playUrl(url, item.name)
-                          }
-                      } catch (e: Exception) { error = e.message }
-                      finally { loading = false }
-                  }
-              }
-
-              fun connect() {
-                  scope.launch {
-                      loading = true; error = null; status = "connecting..."
-                      try {
-                          val s = withContext(Dispatchers.IO) {
-                              repo.connect(portal, mac) }
-                          val exp = withContext(Dispatchers.IO) { repo.expiry(s) }
-                          session = s
-                          expiryInfo = exp
-                          tab = 0; search = ""; page = 1; totalPages = 1
-                          status = "connected: ${s.mac}"
-                          load(1)
-                      } catch (e: Exception) { error = e.message }
-                      finally { loading = false }
-                  }
-              }
-
-              fun scan() {
-                  scope.launch {
-                      loading = true; hits = emptyList(); error = null
-                      status = "scanning..."
-                      withContext(Dispatchers.IO) {
-                          MacScanner.scan(repo, portal, prefix,
-                              count.toIntOrNull() ?: 50, 8,
-                              onHit = { h -> scope.launch { hits = hits + h } },
-                              onDone = { n -> scope.launch {
-                                  status = "scan done: $n hits"; loading = false } })
-                      }
-                  }
-              }
-
-              Column(Modifier.fillMaxSize().padding(14.dp),
-                  verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                  Text("STB Player Pro", style = MaterialTheme.typography
-                      .headlineSmall, color = Accent)
-                  Text(status, color = Color(0xFF8A8F98),
-                      style = MaterialTheme.typography.bodySmall)
-                  if (expiryInfo.isNotEmpty()) Text("Expiry: $expiryInfo",
-                      color = Accent, style = MaterialTheme.typography.bodySmall)
-                  error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-
-                  OutlinedTextField(portal, { portal = it },
-                      label = { Text("Portal URL") },
-                      modifier = Modifier.fillMaxWidth(), singleLine = true)
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      OutlinedTextField(mac, { mac = it }, label = { Text("MAC") },
-                          modifier = Modifier.weight(1f), singleLine = true)
-                      Button({ connect() }, enabled = !loading,
-                          modifier = Modifier.height(56.dp)) { Text("Connect") }
-                  }
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      OutlinedTextField(prefix, { prefix = it },
-                          label = { Text("Prefix") },
-                          modifier = Modifier.weight(1f), singleLine = true)
-                      OutlinedTextField(count, { count = it },
-                          label = { Text("Count") },
-                          modifier = Modifier.weight(1f), singleLine = true)
-                      Button({ scan() }, enabled = !loading,
-                          modifier = Modifier.height(56.dp)) { Text("Scan") }
-                  }
-
-                  if (hits.isNotEmpty()) {
-                      Text("Active MACs (tap = load):", color = Accent,
-                          style = MaterialTheme.typography.labelMedium)
-                      LazyColumn(Modifier.height(120.dp)) {
-                          items(hits) { h ->
-                              Text("${h.mac}  (${h.expiry})", color = Color.White,
-                                  modifier = Modifier.fillMaxWidth()
-                                      .clickable { mac = h.mac; connect() }
-                                      .padding(vertical = 6.dp))
-                          }
-                      }
-                  }
-
-                  Row(Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                      listOf("Live", "VOD", "Series").forEachIndexed { i, label ->
-                          FilterChip(selected = tab == i,
+                  if (!loggedIn) {
+                      Column(Modifier.fillMaxSize().background(Color(0xFF101018))
+                          .padding(24.dp),
+                          verticalArrangement = Arrangement.Center) {
+                          OutlinedTextField(portalUrl, { portalUrl = it },
+                              label = { Text("Portal URL (http://host/c)") },
+                              modifier = Modifier.fillMaxWidth())
+                          Spacer(Modifier.height(8.dp))
+                          OutlinedTextField(mac, { mac = it },
+                              label = { Text("MAC address") },
+                              modifier = Modifier.fillMaxWidth())
+                          Spacer(Modifier.height(12.dp))
+                          Button(
                               onClick = {
-                                  tab = i; search = ""; page = 1; totalPages = 1
-                                  load(1)
+                                  val s = scope
+                                  loading = true; error = null
+                                  s.launch {
+                                      try {
+                                          val p = repo.login(portalUrl, mac)
+                                          expiry = repo.expiry
+                                          channels = repo.allChannels()
+                                          vods = repo.allVod()
+                                          loggedIn = true
+                                      } catch (e: Exception) {
+                                          error = e.message
+                                      } finally { loading = false }
+                                  }
                               },
-                              label = { Text(label) },
-                              modifier = Modifier.weight(1f))
+                              enabled = !loading && portalUrl.isNotBlank(),
+                              modifier = Modifier.fillMaxWidth()) {
+                              Text(if (loading) "Loading..." else "Login")
+                          }
+                          error?.let { Text(it, color = Color.Red, fontSize = 12.sp) }
                       }
-                  }
-                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                      verticalAlignment = Alignment.CenterVertically) {
-                      OutlinedTextField(search, { search = it },
-                          label = { Text("Search") },
-                          modifier = Modifier.weight(1f), singleLine = true)
-                      Button({ load(1) }, enabled = session != null && !loading) {
-                          Text("Go") }
+                      return
                   }
 
-                  if (tab != 0) {
-                      Row(Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(8.dp),
-                          verticalAlignment = Alignment.CenterVertically) {
-                          Button({ load(page - 1) },
-                              enabled = page > 1 && !loading) { Text("Prev") }
-                          Text("Page $page / $totalPages",
-                              modifier = Modifier.weight(1f),
-                              textAlign = TextAlign.Center, color = Color.White)
-                          Button({ load(page + 1) },
-                              enabled = page < totalPages && !loading) { Text("Next") }
-                      }
-                      Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                          verticalAlignment = Alignment.CenterVertically) {
-                          OutlinedTextField(jump, { jump = it },
-                              label = { Text("Jump to page") },
-                              modifier = Modifier.weight(1f), singleLine = true)
-                          Button({
-                              load((jump.toIntOrNull() ?: 1)
-                                  .coerceIn(1, maxOf(1, totalPages)))
-                          }, enabled = session != null && !loading) { Text("Go") }
-                      }
-                  }
-
-                  val shown = if (tab == 0)
-                      items.filter { it.name.contains(search, true) } else items
-
-                  LazyColumn(Modifier.weight(1f),
-                      verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                      items(shown) { item ->
-                          Card(Modifier.fillMaxWidth()
-                              .clickable { openItem(item) }) {
-                              Text(item.name, Modifier.padding(14.dp),
-                                  color = Color.White)
+                  Column(Modifier.fillMaxSize().background(Color(0xFF101018))
+                      .padding(12.dp)) {
+                      Text("Expires: ${expiry ?: "unknown"}",
+                          color = Color(0xFF8BC34A), fontSize = 13.sp)
+                      Row {
+                          listOf("TV (${channels.size})", "VOD (${
+                              vods.count { it.type == "vod" }})", "Series (${
+                              vods.count { it.type == "series" }})").forEachIndexed { i, t ->
+                              TextButton(onClick = { tab = i }) {
+                                  Text(t, color = if (tab == i) Color(0xFFFFC107)
+                                      else Color.White)
+                              }
                           }
                       }
-                  }
-              }
 
-              dialogEpisodes?.let { eps ->
-                  AlertDialog(
-                      onDismissRequest = { dialogEpisodes = null },
-                      confirmButton = {
-                          TextButton(onClick = { dialogEpisodes = null }) {
-                              Text("Close") }
-                      },
-                      title = { Text(dialogTitle, color = Color.White) },
-                      text = {
-                          LazyColumn(Modifier.height(340.dp)) {
-                              items(eps) { ep ->
-                                  Text(ep.name, color = Color.White,
+                      if (tab == 0) {
+                          LazyColumn {
+                              items(channels) { ch ->
+                                  Text("${ch.num}. ${ch.name}", color = Color.White,
                                       modifier = Modifier.fillMaxWidth()
                                           .clickable {
-                                              dialogEpisodes = null
-                                              val s = session ?: return@clickable
                                               scope.launch {
-                                                  loading = true; error = null
+                                                  loading = true
                                                   try {
-                                                      val url = withContext(
-                                                          Dispatchers.IO) {
-                                                          repo.stream(s, ep) }
-                                                      playUrl(url, ep.name)
+                                                      val link = repo.createLink(
+                                                          ch.cmd, "itv", ch.id)
+                                                      playUrl(repo.toUrl(link), ch.name)
                                                   } catch (e: Exception) {
                                                       error = e.message
+                                                  } finally { loading = false }
+                                              }
+                                          }
+                                          .padding(vertical = 8.dp))
+                              }
+                          }
+                      } else {
+                          val list = vods.filter { it.type ==
+                              if (tab == 1) "vod" else "series" }
+                          LazyColumn {
+                              items(list) { v ->
+                                  Text(v.name, color = Color.White,
+                                      modifier = Modifier.fillMaxWidth()
+                                          .clickable {
+                                              if (v.type == "vod") {
+                                                  scope.launch {
+                                                      loading = true
+                                                      try {
+                                                          val link = repo.createLink(
+                                                              v.cmd, "vod", v.id)
+                                                          playUrl(repo.toUrl(link), v.name)
+                                                      } catch (e: Exception) {
+                                                          error = e.message
+                                                      } finally { loading = false }
                                                   }
-                                                  finally { loading = false }
+                                              } else {
+                                                  scope.launch {
+                                                      loading = true
+                                                      try {
+                                                          eps = repo.allEpisodes(v.id)
+                                                          dialogEpisodes = v.name
+                                                      } catch (e: Exception) {
+                                                          error = e.message
+                                                      } finally { loading = false }
+                                                  }
                                               }
                                           }
                                           .padding(vertical = 8.dp))
                               }
                           }
                       }
-                  )
+
+                      error?.let { Text(it, color = Color.Red, fontSize = 12.sp) }
+
+                      dialogEpisodes?.let { seriesName ->
+                          AlertDialog(onDismissRequest = { dialogEpisodes = null },
+                              title = { Text(seriesName, color = Color.White) },
+                              text = {
+                                  LazyColumn(Modifier.height(340.dp)) {
+                                      items(eps) { ep ->
+                                          Text(ep.name, color = Color.White,
+                                              modifier = Modifier.fillMaxWidth()
+                                                  .clickable {
+                                                      dialogEpisodes = null
+                                                      scope.launch {
+                                                          loading = true
+                                                          try {
+                                                              val link = repo.createLink(
+                                                                  ep.cmd, "series", ep.id)
+                                                              playUrl(repo.toUrl(link), ep.name)
+                                                          } catch (e: Exception) {
+                                                              error = e.message
+                                                          } finally { loading = false }
+                                                      }
+                                                  }
+                                                  .padding(vertical = 8.dp))
+                                      }
+                                  }
+                              },
+                              confirmButton = {
+                                  TextButton(onClick = { dialogEpisodes = null }) {
+                                      Text("Close") }
+                              })
+                      }
+                  }
+              }
+
+              private fun playUrl(url: String, title: String) {
+                  val i = Intent(this, PlayerActivity::class.java)
+                  i.putExtra("url", url); i.putExtra("title", title)
+                  startActivity(i)
               }
           }
           XEOF
 
+          echo "part 2 done"
+
+      # ---------------- PART 3: PlayerActivity ----------------
+      - name: Generate project (part 3 - player)
+        run: |
           cat > app/src/main/java/com/stb/iptv/PlayerActivity.kt <<'XEOF'
           package com.stb.iptv
 
@@ -801,9 +595,9 @@ jobs:
 
           echo "project generated"
 
-      
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        run: |
+          gradle --no-daemon assembleDebug || gradle --no-daemon wrapper && gradle --no-daemon assembleDebug
 
       - uses: actions/upload-artifact@v4
         with:
