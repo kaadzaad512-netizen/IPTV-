@@ -841,8 +841,7 @@ jobs:
               }
           }
 
-          @Composable
-          private fun TextButtonHost() {} // placeholder removed at compile: not used
+          
 
           class MainActivity : Activity() {
               override fun onCreate(savedInstanceState: Bundle?) {
