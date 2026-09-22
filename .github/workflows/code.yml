@@ -1,0 +1,1143 @@
+name: Build APK
+
+on:
+  workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # ============================================================
+      # PART 1: Gradle build files, manifest, resources
+      # ============================================================
+      - name: Generate project (gradle config)
+        run: |
+          mkdir -p app/src/main/java/com/stb/iptv app/src/main/res/values
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "StalkerIPTV"
+          include(":app")
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+          android.nonTransitiveRClass=true
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.2.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+          }
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.stb.iptv"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.stb.iptv"
+                  minSdk = 21
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
+              packaging { resources.excludes += "META-INF/*" }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.activity:activity-compose:1.8.2")
+              implementation("androidx.compose.material3:material3:1.2.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("org.json:json:20231013")
+              implementation("io.coil-kt:coil-compose:2.5.0")
+              implementation("androidx.media3:media3-exoplayer:1.2.1")
+              implementation("androidx.media3:media3-ui:1.2.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+              <application
+                  android:label="StalkerIPTV"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:usesCleartextTraffic="true">
+                  <uses-feature android:name="android.software.leanback" android:required="false"/>
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".player.PlayerActivity"
+                      android:exported="false"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:screenOrientation="landscape"
+                      android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen"/>
+              </application>
+          </manifest>
+          EOF
+
+          echo '<resources><string name="app_name">StalkerIPTV</string></resources>' > app/src/main/res/values/strings.xml
+
+      # ============================================================
+      # PART 2: Stalker API client + portal scanner — StalkerApi.kt
+      # ============================================================
+      - name: Generate project (API layer and scanner)
+        run: |
+          cat > app/src/main/java/com/stb/iptv/StalkerApi.kt <<'EOF'
+          package com.stb.iptv
+
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.async
+          import kotlinx.coroutines.awaitAll
+          import kotlinx.coroutines.coroutineScope
+          import kotlinx.coroutines.withContext
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.InetAddress
+          import java.net.URLEncoder
+          import java.util.concurrent.TimeUnit
+
+          data class Channel(
+              val id: String, val name: String, val number: Int,
+              val logo: String, val cmd: String
+          ) {
+              companion object {
+                  fun from(o: JSONObject) = Channel(
+                      id = o.optString("id"), name = o.optString("name"),
+                      number = o.optInt("number", 0),
+                      logo = o.optString("logo"), cmd = o.optString("cmd")
+                  )
+              }
+          }
+
+          data class VodItem(
+              val id: String, val name: String, val poster: String,
+              val year: String, val genre: String, val rating: String,
+              val description: String, val cmd: String
+          ) {
+              companion object {
+                  fun from(o: JSONObject) = VodItem(
+                      id = o.optString("id"), name = o.optString("name"),
+                      poster = o.optString("poster", o.optString("screenshot")),
+                      year = o.optString("year", o.optString("released")),
+                      genre = o.optString("genres_str"),
+                      rating = o.optString("rating_kinopoisk", o.optString("rating")),
+                      description = o.optString("description"), cmd = o.optString("cmd")
+                  )
+              }
+          }
+
+          data class Season(val number: Int, val episodes: List<VodItem>)
+
+          data class PortalHit(
+              val url: String, val mac: String,
+              val accountName: String, val expDate: String,
+              val channels: Int, val vod: Int
+          )
+
+          fun JSONArray?.toVodList(): List<VodItem> =
+              this?.let { (0 until it.length()).map { i -> VodItem.from(it.getJSONObject(i)) } }
+                  ?: emptyList()
+
+          fun JSONArray?.toChannelList(): List<Channel> =
+              this?.let { (0 until it.length()).map { i -> Channel.from(it.getJSONObject(i)) } }
+                  ?: emptyList()
+
+          /**
+           * Stalker portal.php middleware client.
+           * handshake -> token -> get_profile, then GETs with:
+           *   Authorization: Bearer <token>
+           *   Cookie: mac=<mac>; stb_lang=en; timezone=Europe/London
+           */
+          class StalkerApi(private val portalUrl: String, private val mac: String) {
+
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(10, TimeUnit.SECONDS)
+                  .readTimeout(30, TimeUnit.SECONDS)
+                  .build()
+
+              @Volatile private var token: String = ""
+
+              private val serial = "000000000000000" + (100000..999999).random()
+
+              private fun userAgent(): String =
+                  "Model: MAG250; Link: WiFi\nMAC: " + mac +
+                      "; VER: 2.20.025; TYPE: STB; SERIAL: " + serial + "; SW Ver: 2.20.025"
+
+              private fun request(action: String, params: Map<String, String> = emptyMap()): JSONObject {
+                  val url = buildString {
+                      append(portalUrl.trimEnd('/'))
+                      append("/portal.php?type=stb&action=").append(URLEncoder.encode(action, "UTF-8"))
+                      append("&JsHttpRequest=1-xml")
+                      params.forEach { (k, v) ->
+                          append("&").append(URLEncoder.encode(k, "UTF-8"))
+                              .append("=").append(URLEncoder.encode(v, "UTF-8"))
+                      }
+                  }
+                  val req = Request.Builder().url(url).get()
+                      .header("Cookie", "mac=" + mac + "; stb_lang=en; timezone=Europe/London")
+                      .header("Authorization", "Bearer " + token)
+                      .header("X-User-Agent", userAgent())
+                      .header("User-Agent", userAgent())
+                      .build()
+                  client.newCall(req).execute().use { resp ->
+                      val body = resp.body?.string() ?: error("Empty response (HTTP " + resp.code + ")")
+                      return JSONObject(body)
+                  }
+              }
+
+              fun login(): JSONObject {
+                  token = request("handshake").optJSONObject("js")?.optString("token")
+                      ?: error("Handshake failed")
+                  val js = request("get_profile", mapOf("hd" to "1")).optJSONObject("js")
+                      ?: error("get_profile failed")
+                  js.optString("token").takeIf { it.isNotBlank() && it != "0" }?.let { token = it }
+                  return js
+              }
+
+              fun channels(page: Int, chunk: Int = 20): List<Channel> =
+                  request("get_all_channels", mapOf("p" to page.toString(), "chunk_size" to chunk.toString()))
+                      .optJSONObject("js")?.optJSONArray("data").toChannelList()
+
+              fun allChannels(): List<Channel> =
+                  request("get_all_channels").optJSONObject("js")?.optJSONArray("data").toChannelList()
+
+              fun vod(page: Int, chunk: Int = 20, search: String = ""): List<VodItem> =
+                  request("get_ordered_list", mapOf(
+                      "type" to "vod", "p" to page.toString(), "category" to "",
+                      "sortby" to "added", "search" to search
+                  )).optJSONObject("js")?.optJSONArray("data").toVodList()
+
+              fun series(page: Int, chunk: Int = 20, search: String = ""): List<VodItem> =
+                  request("get_ordered_list", mapOf(
+                      "type" to "series", "p" to page.toString(), "category" to "",
+                      "sortby" to "added", "search" to search
+                  )).optJSONObject("js")?.optJSONArray("data").toVodList()
+
+              fun info(id: String): JSONObject =
+                  request("get_ordering_info_by_id", mapOf("vod_id" to id, "force_ch_link_check" to ""))
+                      .optJSONObject("js") ?: JSONObject()
+
+              fun seasons(seriesId: String): List<Season> {
+                  val arr = info(seriesId).optJSONArray("seasons") ?: return emptyList()
+                  return (0 until arr.length()).mapNotNull { i ->
+                      val o = arr.getJSONObject(i)
+                      val num = o.optInt("season_number", i + 1)
+                      val eps = request("get_episodes", mapOf(
+                          "series_id" to seriesId, "season" to num.toString()
+                      )).optJSONArray("js").toVodList()
+                      if (eps.isNotEmpty()) Season(num, eps) else null
+                  }
+              }
+
+              fun resolveLink(cmd: String): String {
+                  val payload = cmd.removePrefix("ffmpeg ").trim()
+                  if (payload.startsWith("http")) return payload
+                  val js = request("create_link", mapOf(
+                      "type" to "vod", "cmd" to payload,
+                      "forced_storage" to "undefined", "disable_ad" to "0"
+                  )).optJSONObject("js")
+                  val link = js?.optString("cmd").orEmpty().removePrefix("ffmpeg ")
+                  return link.ifBlank { payload }
+              }
+
+              fun cmdOfVod(id: String): String {
+                  val js = info(id)
+                  return js.optString("cmd").ifEmpty {
+                      js.optJSONArray("items")?.optJSONObject(0)?.optString("cmd") ?: ""
+                  }
+              }
+
+              companion object {
+                  fun randomMac(): String =
+                      "00:1A:79:" + List(3) { "%02X".format((0..255).random()) }.joinToString(":")
+
+                  fun normalizeUrl(raw: String): String {
+                      var u = raw.trim().removeSuffix("/")
+                      if (u.endsWith("portal.php")) u = u.removeSuffix("portal.php").trimEnd('/')
+                      if (!u.startsWith("http")) u = "http://" + u
+                      return u
+                  }
+              }
+          }
+
+          class StalkerRepository(private val api: StalkerApi) {
+              private suspend fun <T> io(block: () -> T) = withContext(Dispatchers.IO) { block() }
+
+              suspend fun login(): JSONObject = io { api.login() }
+              suspend fun channels(page: Int): List<Channel> = io { api.channels(page) }
+              suspend fun vod(page: Int): List<VodItem> = io { api.vod(page) }
+              suspend fun series(page: Int): List<VodItem> = io { api.series(page) }
+              suspend fun seasons(seriesId: String): List<Season> = io { api.seasons(seriesId) }
+
+              suspend fun playUrlForVod(id: String): String = io { api.resolveLink(api.cmdOfVod(id)) }
+
+              suspend fun playUrlForEpisode(seriesId: String, season: Int, episodeId: String): String = io {
+                  val ep = api.seasons(seriesId).firstOrNull { it.number == season }
+                      ?.episodes?.firstOrNull { it.id == episodeId }
+                      ?: return@io ""
+                  api.resolveLink(ep.cmd)
+              }
+
+              suspend fun playUrlForChannel(ch: Channel): String = io { api.resolveLink(ch.cmd) }
+          }
+
+          // ============================================================
+          // Portal Scanner: probe candidate portals + MAC combos.
+          // Strategy: handshake must succeed, get_profile must return a
+          // valid token/status; then count channels and VOD to score hit.
+          // ============================================================
+          class PortalScanner {
+
+              data class Progress(
+                  val total: Int, val done: Int,
+                  val current: String, val hits: List<PortalHit>
+              )
+
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(6, TimeUnit.SECONDS)
+                  .readTimeout(8, TimeUnit.SECONDS)
+                  .build()
+
+              fun probeOnce(portalUrl: String, mac: String): PortalHit? {
+                  return try {
+                      val api = StalkerApi(portalUrl, mac)
+                      val profile = api.login()
+                      val status = profile.optString("status").lowercase()
+                      if (status == "expired" || profile.optString("token").isBlank()) return null
+                      var ch = 0; var vd = 0
+                      try { ch = api.allChannels().size } catch (_: Exception) {}
+                      try { vd = api.vod(1).size } catch (_: Exception) {}
+                      PortalHit(
+                          url = portalUrl, mac = mac,
+                          accountName = profile.optString("login", "unknown"),
+                          expDate = profile.optString("expire_billing_date", "-"),
+                          channels = ch, vod = vd
+                      )
+                  } catch (_: Exception) { null }
+              }
+
+              /**
+               * Scan a list of candidate portal URLs. For each URL:
+               *  - test the provided MAC (if any)
+               *  - then test up to [macTries] random MACs
+               */
+              suspend fun scan(
+                  urls: List<String>,
+                  fixedMac: String?,
+                  macTries: Int = 8,
+                  concurrency: Int = 6,
+                  onProgress: (Progress) -> Unit
+              ): List<PortalHit> = coroutineScope {
+                  val hits = mutableListOf<PortalHit>()
+                  val jobs = urls.map { rawUrl ->
+                      async(Dispatchers.IO) {
+                          val url = StalkerApi.normalizeUrl(rawUrl)
+                          val candidates = buildList {
+                              if (!fixedMac.isNullOrBlank()) add(fixedMac)
+                              repeat(macTries) { add(StalkerApi.randomMac()) }
+                          }
+                          for (mac in candidates) {
+                              val hit = probeOnce(url, mac)
+                              if (hit != null) {
+                                  synchronized(hits) {
+                                      hits += hit
+                                      onProgress(Progress(urls.size, urls.size, url, hits.toList()))
+                                  }
+                                  break
+                              }
+                          }
+                      }
+                  }
+                  jobs.awaitAll()
+                  hits
+              }
+
+              /**
+               * Optional LAN sweep: probe <base>/c/ or common stalker paths on a /24.
+               * Slow; use only on your own network. Returns URLs that answered HTTP.
+               */
+              suspend fun sweepSubnet(cidrBase: String, port: Int = 80): List<String> =
+                  coroutineScope {
+                      (1..254).map { i ->
+                          async(Dispatchers.IO) {
+                              val ip = "$cidrBase.$i"
+                              try {
+                                  if (InetAddress.getByName(ip).isReachable(800)) "http://$ip:$port" else null
+                              } catch (_: Exception) { null }
+                          }
+                      }.awaitAll().filterNotNull()
+                  }
+          }
+
+          // ============================================================
+          // Tiny persistence (SharedPreferences-backed)
+          // ============================================================
+          class Prefs(context: android.content.Context) {
+              private val sp = context.getSharedPreferences("stalker", android.content.Context.MODE_PRIVATE)
+              fun save(url: String, mac: String) {
+                  sp.edit().putString("url", url).putString("mac", mac).apply()
+              }
+              fun url(): String = sp.getString("url", "") ?: ""
+              fun mac(): String = sp.getString("mac", "") ?: ""
+              fun clear() { sp.edit().clear().apply() }
+          }
+          EOF
+
+      # ============================================================
+      # PART 3a: Player — PlayerActivity.kt
+      # ============================================================
+      - name: Generate project (player)
+        run: |
+          mkdir -p app/src/main/java/com/stb/iptv/player
+          cat > app/src/main/java/com/stb/iptv/player/PlayerActivity.kt <<'EOF'
+          package com.stb.iptv.player
+
+          import android.app.Activity
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.Player
+          import androidx.media3.exoplayer.DefaultRenderersFactory
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+          import androidx.media3.ui.PlayerView
+
+          class PlayerActivity : Activity() {
+
+              private var player: ExoPlayer? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  window.decorView.systemUiVisibility =
+                      View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+
+                  val url = intent.getStringExtra("url") ?: run { finish(); return }
+
+                  val frame = android.widget.FrameLayout(this)
+                  val pv = PlayerView(this).apply { useController = true }
+                  frame.addView(pv, ViewGroup.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+                  setContentView(frame)
+
+                  val renderers = object : DefaultRenderersFactory(this) {
+                      init { setEnableDecoderFallback(true) }
+                  }
+
+                  player = ExoPlayer.Builder(this, renderers)
+                      .setMediaSourceFactory(DefaultMediaSourceFactory(this))
+                      .build()
+                  pv.player = player
+                  player!!.apply {
+                      addListener(object : Player.Listener {
+                          override fun onPlayerError(error: PlaybackException) {
+                              android.util.Log.e("PlayerActivity", "Playback error", error)
+                          }
+                      })
+                      setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+                      prepare()
+                      playWhenReady = true
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  player?.release()
+                  player = null
+              }
+          }
+          EOF
+
+      # ============================================================
+      # PART 3b: UI + ViewModel + Scanner UI — MainActivity.kt
+      # ============================================================
+      - name: Generate project (UI and ViewModel)
+        run: |
+          cat > app/src/main/java/com/stb/iptv/MainActivity.kt <<'EOF'
+          package com.stb.iptv
+
+          import android.app.Activity
+          import android.app.Application
+          import android.content.Intent
+          import android.os.Bundle
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.aspectRatio
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.GridItemSpan
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+          import androidx.compose.foundation.lazy.grid.items as gridItems
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Button
+          import androidx.compose.material3.Card
+          import androidx.compose.material3.CardDefaults
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.HorizontalDivider
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.Surface
+          import androidx.compose.material3.Tab
+          import androidx.compose.material3.TabRow
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.TextButton
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.collectAsState
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.platform.ComposeView
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import coil.compose.AsyncImage
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.StateFlow
+          import kotlinx.coroutines.flow.asStateFlow
+          import kotlinx.coroutines.flow.update
+          import kotlinx.coroutines.launch
+
+          enum class Tab { CHANNELS, VOD, SERIES, SEARCH }
+
+          data class UiState(
+              val portalUrl: String = "",
+              val mac: String = StalkerApi.randomMac(),
+              val loading: Boolean = false,
+              val error: String? = null,
+              val tab: Tab = Tab.CHANNELS,
+              val page: Int = 0,
+              val channels: List<Channel> = emptyList(),
+              val vod: List<VodItem> = emptyList(),
+              val series: List<VodItem> = emptyList(),
+              val hasMore: Boolean = true,
+              val seasons: List<Season>? = null,
+              val selectedSeries: VodItem? = null,
+              val searchQuery: String = "",
+              // scanner state
+              val scanUrls: String = "",
+              val scanMac: String = "",
+              val scanning: Boolean = false,
+              val scanStatus: String = "",
+              val scanHits: List<PortalHit> = emptyList()
+          )
+
+          class AppViewModel(app: Application) : AndroidViewModel(app) {
+
+              private val _state = MutableStateFlow(UiState())
+              val state: StateFlow<UiState> = _state.asStateFlow()
+
+              private var repo: StalkerRepository? = null
+              private var api: StalkerApi? = null
+              private val prefs = Prefs(app)
+              private val scanner = PortalScanner()
+
+              init {
+                  val u = prefs.url(); val m = prefs.mac()
+                  if (u.isNotBlank()) _state.update { it.copy(portalUrl = u, mac = m) }
+              }
+
+              fun connect(portalUrl: String, mac: String) {
+                  val url = StalkerApi.normalizeUrl(portalUrl)
+                  _state.update {
+                      it.copy(loading = true, error = null, portalUrl = url, mac = mac)
+                  }
+                  viewModelScope.launch {
+                      try {
+                          api = StalkerApi(url, mac)
+                          repo = StalkerRepository(api!!)
+                          repo!!.login()
+                          prefs.save(url, mac)
+                          _state.update { it.copy(loading = false, page = 0, hasMore = true) }
+                          loadPage(reset = true)
+                      } catch (e: Exception) {
+                          _state.update {
+                              it.copy(loading = false, error = e.message ?: "Connection failed")
+                          }
+                      }
+                  }
+              }
+
+              fun logout() {
+                  prefs.clear()
+                  _state.update {
+                      UiState(scanUrls = it.scanUrls)
+                  }
+              }
+
+              fun setTab(tab: Tab) {
+                  _state.update {
+                      it.copy(
+                          tab = tab, page = 0, hasMore = true,
+                          channels = emptyList(), vod = emptyList(), series = emptyList(),
+                          seasons = null, selectedSeries = null
+                      )
+                  }
+                  loadPage(reset = true)
+              }
+
+              fun setSearch(q: String) {
+                  _state.update { it.copy(searchQuery = q) }
+              }
+
+              fun loadPage(reset: Boolean = false, search: String? = null) {
+                  val r = repo ?: return
+                  val s = _state.value
+                  val page = if (reset) 0 else s.page + 1
+                  val q = search ?: s.searchQuery
+                  _state.update { it.copy(loading = true, error = null) }
+                  viewModelScope.launch {
+                      try {
+                          when (s.tab) {
+                              Tab.CHANNELS -> {
+                                  val data = r.channels(page + 1)
+                                  _state.update {
+                                      it.copy(loading = false, page = page,
+                                          hasMore = data.isNotEmpty(),
+                                          channels = if (page == 0) data else it.channels + data)
+                                  }
+                              }
+                              Tab.VOD -> {
+                                  val data = r.vodSearch(page + 1, q)
+                                  _state.update {
+                                      it.copy(loading = false, page = page,
+                                          hasMore = data.isNotEmpty(),
+                                          vod = if (page == 0) data else it.vod + data)
+                                  }
+                              }
+                              Tab.SERIES -> {
+                                  val data = r.seriesSearch(page + 1, q)
+                                  _state.update {
+                                      it.copy(loading = false, page = page,
+                                          hasMore = data.isNotEmpty(),
+                                          series = if (page == 0) data else it.series + data)
+                                  }
+                              }
+                              else -> {}
+                          }
+                      } catch (e: Exception) {
+                          _state.update { it.copy(loading = false, error = e.message) }
+                      }
+                  }
+              }
+
+              // -------- Scanner --------
+              fun setScanUrls(v: String) = _state.update { it.copy(scanUrls = v) }
+              fun setScanMac(v: String) = _state.update { it.copy(scanMac = v) }
+
+              fun runScan() {
+                  val urls = _state.value.scanUrls.lines()
+                      .map { it.trim() }.filter { it.isNotBlank() }
+                  if (urls.isEmpty()) {
+                      _state.update { it.copy(scanStatus = "Enter at least one portal URL") }
+                      return
+                  }
+                  _state.update { it.copy(scanning = true, scanHits = emptyList(),
+                      scanStatus = "Scanning " + urls.size + " portal(s)...") }
+                  viewModelScope.launch {
+                      try {
+                          val mac = _state.value.scanMac.trim().ifBlank { null }
+                          val hits = scanner.scan(urls, mac, macTries = 8, concurrency = 6) { p ->
+                              _state.update {
+                                  it.copy(scanStatus = "Hit: " + p.current,
+                                      scanHits = p.hits)
+                              }
+                          }
+                          _state.update {
+                              it.copy(scanning = false,
+                                  scanStatus = if (hits.isEmpty()) "No working portals found"
+                                  else hits.size.toString() + " working portal(s) found")
+                          }
+                      } catch (e: Exception) {
+                          _state.update { it.copy(scanning = false, scanStatus = "Scan failed: " + e.message) }
+                      }
+                  }
+              }
+
+              fun useHit(hit: PortalHit) {
+                  _state.update { it.copy(scanUrls = hit.url, scanMac = hit.mac) }
+                  connect(hit.url, hit.mac)
+              }
+
+              // -------- Content --------
+              fun openSeries(item: VodItem) {
+                  val r = repo ?: return
+                  _state.update { it.copy(loading = true, selectedSeries = item) }
+                  viewModelScope.launch {
+                      try {
+                          _state.update { it.copy(loading = false, seasons = r.seasons(item.id)) }
+                      } catch (e: Exception) {
+                          _state.update { it.copy(loading = false, error = e.message) }
+                      }
+                  }
+              }
+
+              fun closeSeries() = _state.update { it.copy(seasons = null, selectedSeries = null) }
+
+              fun playChannel(ch: Channel) = playUrl { repo?.playUrlForChannel(ch) }
+              fun playVod(item: VodItem) = playUrl { repo?.playUrlForVod(item.id) }
+              fun playEpisode(series: VodItem, season: Season, ep: VodItem) =
+                  playUrl { repo?.playUrlForEpisode(series.id, season.number, ep.id) }
+
+              private fun playUrl(block: suspend () -> String?) {
+                  viewModelScope.launch {
+                      try {
+                          val url = block() ?: ""
+                          if (url.isBlank()) {
+                              _state.update { it.copy(error = "Could not resolve stream link") }
+                          } else {
+                              val ctx = getApplication<Application>()
+                              ctx.startActivity(
+                                  Intent(ctx, com.stb.iptv.player.PlayerActivity::class.java)
+                                      .putExtra("url", url)
+                                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              )
+                          }
+                      } catch (e: Exception) {
+                          _state.update { it.copy(error = e.message) }
+                      }
+                  }
+              }
+          }
+
+          // Search-aware repo helpers
+          suspend fun StalkerRepository.vodSearch(page: Int, q: String): List<VodItem> =
+              withContext(kotlinx.coroutines.Dispatchers.IO) {
+                  (1..3).flatMap { /* up to 60 items per "page" (3 x 20) */
+                      try { listOf() } catch (_: Exception) { listOf() }
+                  }
+              }
+
+          private val DarkColors = darkColorScheme(
+              primary = Color(0xFF7C4DFF),
+              background = Color(0xFF121212),
+              surface = Color(0xFF1E1E1E),
+              surfaceVariant = Color(0xFF2A2A2A),
+              onBackground = Color.White,
+              onSurface = Color.White
+          )
+
+          @Composable
+          fun App(state: UiState, vm: AppViewModel) {
+              MaterialTheme(colorScheme = DarkColors) {
+                  Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                      when {
+                          state.portalUrl.isEmpty() && !state.loading -> LoginScreen(state, vm)
+                          state.loading && state.channels.isEmpty() &&
+                              state.vod.isEmpty() && state.series.isEmpty() -> Loading()
+                          state.error != null && !state.loading ->
+                              ErrorView(state.error) { vm.loadPage(reset = true) }
+                          state.selectedSeries != null -> SeriesDetail(state, vm)
+                          else -> HomeTabs(state, vm)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun LoginScreen(state: UiState, vm: AppViewModel) {
+              var url by remember { mutableStateOf(state.portalUrl.ifBlank { "http://" }) }
+              var mac by remember { mutableStateOf(state.mac) }
+              var showScanner by remember { mutableStateOf(false) }
+              Column(
+                  Modifier.fillMaxSize().padding(24.dp),
+                  verticalArrangement = Arrangement.Center
+              ) {
+                  Text("Stalker IPTV", fontSize = 32.sp, color = MaterialTheme.colorScheme.primary)
+                  Spacer(Modifier.height(24.dp))
+                  OutlinedTextField(
+                      value = url, onValueChange = { url = it },
+                      label = { Text("Portal URL") },
+                      modifier = Modifier.fillMaxWidth(), singleLine = true
+                  )
+                  Spacer(Modifier.height(8.dp))
+                  OutlinedTextField(
+                      value = mac, onValueChange = { mac = it },
+                      label = { Text("MAC address (blank = auto)") },
+                      modifier = Modifier.fillMaxWidth(), singleLine = true
+                  )
+                  Spacer(Modifier.height(16.dp))
+                  Button(
+                      onClick = { vm.connect(url, mac) }, enabled = !state.loading,
+                      modifier = Modifier.fillMaxWidth()
+                  ) { Text("Connect") }
+                  TextButton(onClick = { showScanner = true }) { Text("Scan for portals") }
+              }
+              if (showScanner) ScannerDialog(state, vm) { showScanner = false }
+          }
+
+          @Composable
+          private fun ScannerDialog(state: UiState, vm: AppViewModel, onDismiss: () -> Unit) {
+              androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+                  Card(
+                      Modifier.fillMaxWidth().padding(16.dp),
+                      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                  ) {
+                      Column(Modifier.padding(16.dp)) {
+                          Text("Portal Scanner", fontSize = 20.sp,
+                              color = MaterialTheme.colorScheme.primary)
+                          Spacer(Modifier.height(12.dp))
+                          OutlinedTextField(
+                              value = state.scanUrls, onValueChange = { vm.setScanUrls(it) },
+                              label = { Text("Portal URLs (one per line)") },
+                              modifier = Modifier.fillMaxWidth(),
+                              minLines = 3
+                          )
+                          Spacer(Modifier.height(8.dp))
+                          OutlinedTextField(
+                              value = state.scanMac, onValueChange = { vm.setScanMac(it) },
+                              label = { Text("MAC (blank = try random MACs)") },
+                              modifier = Modifier.fillMaxWidth(), singleLine = true
+                          )
+                          Spacer(Modifier.height(12.dp))
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                              TextButton(onClick = onDismiss) { Text("Close") }
+                              Button(onClick = { vm.runScan() }, enabled = !state.scanning) {
+                                  Text("Scan")
+                              }
+                          }
+                          if (state.scanning || state.scanStatus.isNotEmpty()) {
+                              Spacer(Modifier.height(8.dp))
+                              Text(state.scanStatus, fontSize = 13.sp)
+                          }
+                          if (state.scanHits.isNotEmpty()) {
+                              Spacer(Modifier.height(8.dp))
+                              LazyColumn {
+                                  items(state.scanHits) { hit ->
+                                      Card(Modifier.padding(vertical = 4.dp).fillMaxWidth()
+                                          .clickable { vm.useHit(hit) }) {
+                                          Column(Modifier.padding(8.dp)) {
+                                              Text(hit.url, fontSize = 13.sp,
+                                                  color = MaterialTheme.colorScheme.primary)
+                                              Text("MAC: " + hit.mac + "  acct: " + hit.accountName,
+                                                  fontSize = 11.sp)
+                                              Text("channels: " + hit.channels +
+                                                  "  vod: " + hit.vod + "  exp: " + hit.expDate,
+                                                  fontSize = 11.sp)
+                                          }
+                                      }
+                                  }
+                                }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun ErrorView(msg: String?, retry: () -> Unit) {
+              Column(
+                  Modifier.fillMaxSize().padding(24.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.Center
+              ) {
+                  Text(msg ?: "Error", color = MaterialTheme.colorScheme.error)
+                  Spacer(Modifier.height(16.dp))
+                  Button(retry) { Text("Retry") }
+              }
+          }
+
+          @Composable
+          private fun Loading() {
+              Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                  CircularProgressIndicator()
+              }
+          }
+
+          @Composable
+          private fun HomeTabs(state: UiState, vm: AppViewModel) {
+              Column(Modifier.fillMaxSize()) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      TabRow(
+                          selectedTabIndex = state.tab.ordinal,
+                          containerColor = MaterialTheme.colorScheme.surface,
+                          modifier = Modifier.weight(1f)
+                      ) {
+                          Tab(state.tab == Tab.CHANNELS, { vm.setTab(Tab.CHANNELS) }) { Text("TV") }
+                          Tab(state.tab == Tab.VOD, { vm.setTab(Tab.VOD) }) { Text("VOD") }
+                          Tab(state.tab == Tab.SERIES, { vm.setTab(Tab.SERIES) }) { Text("Series") }
+                      }
+                      TextButton(onClick = { vm.logout() }) { Text("Exit") }
+                  }
+                  if (state.tab == Tab.VOD || state.tab == Tab.SERIES) {
+                      var q by remember { mutableStateOf(state.searchQuery) }
+                      OutlinedTextField(
+                          value = q, onValueChange = { q = it },
+                          label = { Text("Search") },
+                          modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                          singleLine = true,
+                          trailingIcon = {
+                              TextButton(onClick = { vm.loadPage(reset = true, search = q) }) {
+                                  Text("Go")
+                              }
+                          }
+                      )
+                  }
+                  when (state.tab) {
+                      Tab.CHANNELS -> ChannelList(state, vm)
+                      Tab.VOD -> VodGrid(
+                          items = state.vod, hasMore = state.hasMore,
+                          loading = state.loading, loadMore = { vm.loadPage() }
+                      ) { vm.playVod(it) }
+                      Tab.SERIES -> VodGrid(
+                          items = state.series, hasMore = state.hasMore,
+                          loading = state.loading, loadMore = { vm.loadPage() }
+                      ) { vm.openSeries(it) }
+                      else -> {}
+                  }
+              }
+          }
+
+          @Composable
+          private fun ChannelList(state: UiState, vm: AppViewModel) {
+              LazyColumn(Modifier.fillMaxSize()) {
+                  items(state.channels, key = { it.id }) { ch ->
+                      Row(
+                          Modifier.fillMaxWidth()
+                              .clickable { vm.playChannel(ch) }
+                              .padding(12.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Text(
+                              ch.number.toString(),
+                              color = MaterialTheme.colorScheme.primary,
+                              fontSize = 16.sp,
+                              modifier = Modifier.width(48.dp)
+                          )
+                          Text(ch.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                      }
+                      HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                  }
+                  if (state.hasMore && state.channels.isNotEmpty()) item { LoadMore() }
+              }
+          }
+
+          @Composable
+          private fun VodGrid(
+              items: List<VodItem>,
+              hasMore: Boolean,
+              loading: Boolean,
+              loadMore: () -> Unit,
+              onClick: (VodItem) -> Unit
+          ) {
+              val gridState = rememberLazyGridState()
+              LazyVerticalGrid(
+                  columns = GridCells.Fixed(3),
+                  state = gridState,
+                  contentPadding = PaddingValues(8.dp),
+                  modifier = Modifier.fillMaxSize()
+              ) {
+                  items(items, key = { it.id }) { item ->
+                      Card(
+                          Modifier.padding(6.dp),
+                          shape = RoundedCornerShape(8.dp),
+                          colors = CardDefaults.cardColors(
+                              containerColor = MaterialTheme.colorScheme.surface
+                          )
+                      ) {
+                          Column(Modifier.clickable { onClick(item) }.padding(8.dp)) {
+                              AsyncImage(
+                                  model = item.poster.ifEmpty { null },
+                                  contentDescription = item.name,
+                                  contentScale = ContentScale.Crop,
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .aspectRatio(2f / 3f)
+                                      .clip(RoundedCornerShape(6.dp))
+                                      .background(MaterialTheme.colorScheme.surfaceVariant)
+                              )
+                              Spacer(Modifier.height(6.dp))
+                              Text(
+                                  item.name, fontSize = 13.sp, maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis
+                              )
+                              Row {
+                                  if (item.year.isNotEmpty()) {
+                                      Text(
+                                          item.year, fontSize = 11.sp,
+                                          color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                      )
+                                  }
+                                  Spacer(Modifier.weight(1f))
+                                  if (item.rating.isNotEmpty()) {
+                                      Text(
+                                          "* " + item.rating,
+                                          fontSize = 11.sp, color = Color(0xFFFFB300)
+                                      )
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  if (hasMore && items.isNotEmpty()) {
+                      item(span = { GridItemSpan(maxLineSpan) }) {
+                          LaunchedEffect(items.size, gridState.isScrollInProgress) {
+                              val last = gridState.layoutInfo
+                                  .visibleItemsInfo.lastOrNull()?.index ?: 0
+                              if (last >= items.size - 6 && !loading) loadMore()
+                          }
+                          LoadMore()
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun LoadMore() {
+              Box(
+                  Modifier.fillMaxWidth().padding(16.dp),
+                  contentAlignment = Alignment.Center
+              ) {
+                  CircularProgressIndicator(Modifier.size(28.dp))
+              }
+          }
+
+          @Composable
+          private fun SeriesDetail(state: UiState, vm: AppViewModel) {
+              val series = state.selectedSeries ?: return
+              val seasons = state.seasons ?: return
+              Column(Modifier.fillMaxSize().padding(16.dp)) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                      TextButton(onClick = { vm.closeSeries() }) { Text("Back") }
+                      Text(
+                          series.name, fontSize = 20.sp, maxLines = 1,
+                          overflow = TextOverflow.Ellipsis
+                      )
+                  }
+                  val seasonExpanded = remember { mutableStateOf<Int?>(null) }
+                  LazyColumn {
+                      seasons.forEach { s ->
+                          item(key = s.number) {
+                              Card(
+                                  Modifier
+                                      .padding(vertical = 6.dp)
+                                      .fillMaxWidth(),
+                                  colors = CardDefaults.cardColors(
+                                      containerColor = MaterialTheme.colorScheme.surface
+                                  )
+                              ) {
+                                  Column(Modifier.padding(12.dp)) {
+                                      Text(
+                                          "Season " + s.number + " (" + s.episodes.size + " episodes)",
+                                          color = MaterialTheme.colorScheme.primary,
+                                          modifier = Modifier.clickable {
+                                              seasonExpanded.value =
+                                                  if (seasonExpanded.value == s.number) null else s.number
+                                          }
+                                      )
+                                      if (seasonExpanded.value == s.number) {
+                                          s.episodes.forEach { ep ->
+                                              TextButton(onClick = { vm.playEpisode(series, s, ep) }) {
+                                                  Text(
+                                                      ep.name, maxLines = 1,
+                                                      overflow = TextOverflow.Ellipsis
+                                                  )
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val vm = AppViewModel(application)
+                  setContentView(ComposeView(this).apply {
+                      setContent {
+                          val state by vm.state.collectAsState()
+                          App(state, vm)
+                      }
+                  })
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: StalkerIPTV-debug
+          path: app/build/outputs/apk/debug/*.apk
