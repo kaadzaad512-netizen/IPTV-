@@ -239,6 +239,128 @@ jobs:
 
               fun series(page: Int, chunk: Int = 20, search: String = ""): List<VodItem> =
                   request("get_ordered_list", mapOf(
+      # ============================================================
+      # PART 2: Stalker API client (portal.php) — StalkerApi.kt
+      # ============================================================
+      - name: Generate project (API layer)
+        run: |
+          cat > app/src/main/java/com/stb/iptv/StalkerApi.kt <<'EOF'
+          package com.stb.iptv
+
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.URLEncoder
+          import java.util.concurrent.TimeUnit
+
+          data class Channel(
+              val id: String, val name: String, val number: Int,
+              val logo: String, val cmd: String
+          ) {
+              companion object {
+                  fun from(o: JSONObject) = Channel(
+                      id = o.optString("id"), name = o.optString("name"),
+                      number = o.optInt("number", 0),
+                      logo = o.optString("logo"), cmd = o.optString("cmd")
+                  )
+              }
+          }
+
+          data class VodItem(
+              val id: String, val name: String, val poster: String,
+              val year: String, val genre: String, val rating: String,
+              val description: String, val cmd: String
+          ) {
+              companion object {
+                  fun from(o: JSONObject) = VodItem(
+                      id = o.optString("id"), name = o.optString("name"),
+                      poster = o.optString("poster", o.optString("screenshot")),
+                      year = o.optString("year", o.optString("released")),
+                      genre = o.optString("genres_str"),
+                      rating = o.optString("rating_kinopoisk", o.optString("rating")),
+                      description = o.optString("description"), cmd = o.optString("cmd")
+                  )
+              }
+          }
+
+          data class Season(val number: Int, val episodes: List<VodItem>)
+
+          // Extensions accept NULLABLE JSONArray — empty list on missing data
+          fun JSONArray?.toVodList(): List<VodItem> =
+              this?.let { (0 until it.length()).map { i -> VodItem.from(it.getJSONObject(i)) } }
+                  ?: emptyList()
+
+          fun JSONArray?.toChannelList(): List<Channel> =
+              this?.let { (0 until it.length()).map { i -> Channel.from(it.getJSONObject(i)) } }
+                  ?: emptyList()
+
+          /**
+           * Stalker portal.php middleware client.
+           * handshake -> token -> get_profile, then GETs with:
+           *   Authorization: Bearer <token>
+           *   Cookie: mac=<mac>; stb_lang=en; timezone=Europe/London
+           */
+          class StalkerApi(private val portalUrl: String, private val mac: String) {
+
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(15, TimeUnit.SECONDS)
+                  .readTimeout(30, TimeUnit.SECONDS)
+                  .build()
+
+              @Volatile private var token: String = ""
+
+              private val serial = "000000000000000" + (100000..999999).random()
+
+              private fun userAgent(): String =
+                  "Model: MAG250; Link: WiFi\nMAC: " + mac +
+                      "; VER: 2.20.025; TYPE: STB; SERIAL: " + serial + "; SW Ver: 2.20.025"
+
+              private fun request(action: String, params: Map<String, String> = emptyMap()): JSONObject {
+                  val url = buildString {
+                      append(portalUrl.trimEnd('/'))
+                      append("/portal.php?type=stb&action=").append(URLEncoder.encode(action, "UTF-8"))
+                      append("&JsHttpRequest=1-xml")
+                      params.forEach { (k, v) ->
+                          append("&").append(URLEncoder.encode(k, "UTF-8"))
+                              .append("=").append(URLEncoder.encode(v, "UTF-8"))
+                      }
+                  }
+                  val req = Request.Builder().url(url).get()
+                      .header("Cookie", "mac=" + mac + "; stb_lang=en; timezone=Europe/London")
+                      .header("Authorization", "Bearer " + token)
+                      .header("X-User-Agent", userAgent())
+                      .header("User-Agent", userAgent())
+                      .build()
+                  client.newCall(req).execute().use { resp ->
+                      val body = resp.body?.string() ?: error("Empty response (HTTP " + resp.code + ")")
+                      return JSONObject(body)
+                  }
+              }
+
+              fun login(): JSONObject {
+                  token = request("handshake").optJSONObject("js")?.optString("token")
+                      ?: error("Handshake failed")
+                  val js = request("get_profile", mapOf("hd" to "1")).optJSONObject("js")
+                      ?: error("get_profile failed")
+                  js.optString("token").takeIf { it.isNotBlank() && it != "0" }?.let { token = it }
+                  return js
+              }
+
+              fun channels(page: Int, chunk: Int = 20): List<Channel> =
+                  request("get_all_channels", mapOf("p" to page.toString(), "chunk_size" to chunk.toString()))
+                      .optJSONObject("js")?.optJSONArray("data").toChannelList()
+
+              fun vod(page: Int, chunk: Int = 20, search: String = ""): List<VodItem> =
+                  request("get_ordered_list", mapOf(
+                      "type" to "vod", "p" to page.toString(), "category" to "",
+                      "sortby" to "added", "search" to search
+                  )).optJSONObject("js")?.optJSONArray("data").toVodList()
+
+              fun series(page: Int, chunk: Int = 20, search: String = ""): List<VodItem> =
+                  request("get_ordered_list", mapOf(
                       "type" to "series", "p" to page.toString(), "category" to "",
                       "sortby" to "added", "search" to search
                   )).optJSONObject("js")?.optJSONArray("data").toVodList()
@@ -284,7 +406,8 @@ jobs:
           }
 
           class StalkerRepository(private val api: StalkerApi) {
-              private fun <T> io(block: () -> T) = withContext(Dispatchers.IO) { block() }
+              // FIX: must be suspend for withContext
+              private suspend fun <T> io(block: () -> T) = withContext(Dispatchers.IO) { block() }
 
               suspend fun login(): JSONObject = io { api.login() }
               suspend fun channels(page: Int): List<Channel> = io { api.channels(page) }
