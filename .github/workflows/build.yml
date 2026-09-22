@@ -70,6 +70,11 @@ jobs:
               composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
           }
           dependencies {
+              implementation("androidx.media3:media3-exoplayer:1.4.1")
+              implementation("androidx.media3:media3-ui:1.4.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+              implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
+              implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
               implementation("androidx.core:core-ktx:1.13.1")
               implementation("androidx.activity:activity-compose:1.9.0")
               implementation(platform("androidx.compose:compose-bom:2024.06.00"))
@@ -644,7 +649,9 @@ jobs:
 
           cat > app/src/main/java/com/stb/iptv/PlayerActivity.kt <<'XEOF'
           package com.stb.iptv
-
+          android:screenOrientation="landscape"
+          android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|layoutDirection"
+          android:exported="false" />
           import android.os.Bundle
           import android.view.View
           import android.view.WindowInsets
