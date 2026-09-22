@@ -1,0 +1,760 @@
+name: Build APK
+
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Generate project
+        run: |
+          mkdir -p app/src/main/java/com/stb/iptv \
+                   app/src/main/res/values app/src/main/res/drawable
+
+          cat > settings.gradle.kts <<'XEOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "StalkerIPTV"
+          include(":app")
+          XEOF
+
+          cat > build.gradle.kts <<'XEOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          XEOF
+
+          cat > gradle.properties <<'XEOF'
+          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          XEOF
+
+          cat > app/build.gradle.kts <<'XEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.stb.iptv"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.stb.iptv"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 4
+                  versionName = "4.0"
+              }
+              buildTypes { release { isMinifyEnabled = false } }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+              implementation("androidx.media3:media3-exoplayer:1.4.1")
+              implementation("androidx.media3:media3-ui:1.4.1")
+              implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+              implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
+              implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
+              implementation("androidx.media3:media3-datasource-okhttp:1.4.1")
+          }
+          XEOF
+
+          cat > app/src/main/AndroidManifest.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="STB Player Pro"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.App">
+                  <activity android:name=".PlayerActivity"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|layoutDirection"
+                      android:exported="false" />
+                  <activity android:name=".MainActivity" 
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          XEOF
+
+          cat > app/src/main/res/values/themes.xml <<'XEOF'
+          <resources>
+              <style name="Theme.App" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#070B14</item>
+                  <item name="android:statusBarColor">#070B14</item>
+                  <item name="android:windowLightStatusBar">false</item>
+              </style>
+          </resources>
+          XEOF
+
+          cat > app/src/main/res/drawable/bg.xml <<'XEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <gradient android:angle="270" android:startColor="#070B14"
+                  android:centerColor="#0F172A" android:endColor="#070B14" />
+          </shape>
+          XEOF
+
+          cat > app/src/main/java/com/stb/iptv/StalkerRepository.kt <<'XEOF'
+          package com.stb.iptv
+
+          import okhttp3.HttpUrl.Companion.toHttpUrl
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import org.json.JSONObject
+          import java.io.IOException
+          import java.net.URLEncoder
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import java.util.concurrent.TimeUnit
+
+          data class Session(val portal: String, val token: String, val mac: String, val isM3u: Boolean = false, val m3uData: String = "")
+          data class MediaItem(val id: String, val name: String, val type: String,
+                               val group: String = "", val cmd: String = "")
+
+          class StalkerRepository {
+              private val http = OkHttpClient.Builder()
+                  .connectTimeout(20, TimeUnit.SECONDS)
+                  .readTimeout(45, TimeUnit.SECONDS).build()
+
+              private val ua = "Mozilla/5.0 (QtEmbedded; U; Linux; C) " +
+                  "AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 " +
+                  "rev: 250 Safari/533.3"
+
+              fun normalizeMac(raw: String): String? {
+                  val v = raw.filter { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
+                      .uppercase()
+                  return if (v.length == 12) v.chunked(2).joinToString(":") else null
+              }
+
+              fun parseM3u(url: String): List<MediaItem> {
+                  val rb = Request.Builder().url(url).header("User-Agent", ua).build()
+                  http.newCall(rb).execute().use { response ->
+                      if (!response.isSuccessful) throw IOException("M3U Fetch Failed: ${response.code}")
+                      val content = response.body?.string().orEmpty()
+                      val items = mutableListOf<MediaItem>()
+                      var currentName = "Unknown Channel"
+                      var idCounter = 1
+                      
+                      content.lines().forEach { rawLine ->
+                          val line = rawLine.trim()
+                          if (line.startsWith("#EXTINF:")) {
+                              currentName = line.substringAfterLast(",").ifBlank { "Channel $idCounter" }
+                          } else if (line.isNotEmpty() && !line.startsWith("#")) {
+                              val type = when {
+                                  line.contains("/movie/") || line.contains(".mp4") || line.contains(".mkv") -> "vod"
+                                  line.contains("/series/") -> "series"
+                                  else -> "itv"
+                              }
+                              items.add(MediaItem(id = idCounter.toString(), name = currentName, type = type, cmd = line))
+                              idCounter++
+                          }
+                      }
+                      return items
+                  }
+              }
+
+              fun connect(portal: String, rawMac: String): Session {
+                  val cleanedPortal = portal.trim()
+                  if (cleanedPortal.endsWith(".m3u") || cleanedPortal.endsWith(".m3u8") || cleanedPortal.contains("get.php")) {
+                      return Session(portal = cleanedPortal, token = "M3U_PLAYLIST", mac = "00:00:00:00:00:00", isM3u = true)
+                  }
+
+                  val mac = normalizeMac(rawMac) ?: throw IllegalArgumentException("Invalid MAC Format")
+                  var last: Exception = IOException("Handshake connection failed")
+                  
+                  val targetUrls = if (cleanedPortal.endsWith("/portal.php")) listOf(cleanedPortal) else listOf(
+                      "$cleanedPortal/c/portal.php", "$cleanedPortal/portal.php", "$cleanedPortal/server/load.php"
+                  ).distinct()
+
+                  for (u in targetUrls) {
+                      try {
+                          val uBuilder = u.toHttpUrl().newBuilder().apply {
+                              addQueryParameter("type", "stb")
+                              addQueryParameter("action", "handshake")
+                              addQueryParameter("token", "")
+                              addQueryParameter("JsHttpRequest", "1-xml")
+                              addQueryParameter("mac", mac)
+                          }.build()
+                          
+                          val rb = Request.Builder().url(uBuilder)
+                              .header("User-Agent", ua)
+                              .header("X-User-Agent", "Model: MAG254; Link: Ethernet")
+                              .build()
+
+                          http.newCall(rb).execute().use { r ->
+                              val body = r.body?.string().orEmpty()
+                              val js = JSONObject(body).optJSONObject("js")
+                              val tok = js?.optString("token").orEmpty().substringBefore("~").trim()
+                              if (tok.isNotEmpty()) return Session(u, tok, mac, false)
+                          }
+                      } catch (e: Exception) { last = e }
+                  }
+                  throw last
+              }
+
+              fun expiry(s: Session): String {
+                  if (s.isM3u) return "External M3U File"
+                  return try {
+                      val u = s.portal.toHttpUrl().newBuilder().apply {
+                          addQueryParameter("type", "stb")
+                          addQueryParameter("action", "get_profile")
+                          addQueryParameter("JsHttpRequest", "1-xml")
+                      }.build()
+                      val rb = Request.Builder().url(u)
+                          .header("User-Agent", ua)
+                          .header("Authorization", "Bearer ${s.token}")
+                          .header("Cookie", "mac=${s.mac}")
+                          .build()
+                      http.newCall(rb).execute().use { r ->
+                          val obj = JSONObject(r.body?.string().orEmpty()).optJSONObject("js")
+                          val exp = obj?.optString("expire_date") ?: "unlimited"
+                          if(exp.isBlank() || exp == "null") "Unlimited" else exp
+                      }
+                  } catch (_: Exception) { "Active" }
+              }
+
+              fun fetchItems(s: Session, type: String, page: Int = 1): List<MediaItem> {
+                  if (s.isM3u) {
+                      return parseM3u(s.portal).filter { it.type == type }
+                  }
+                  
+                  val action = when (type) {
+                      "itv" -> "get_all_channels"
+                      else -> "get_ordered_list"
+                  }
+                  
+                  val u = s.portal.toHttpUrl().newBuilder().apply {
+                      addQueryParameter("type", type)
+                      addQueryParameter("action", action)
+                      addQueryParameter("JsHttpRequest", "1-xml")
+                      if (type != "itv") {
+                          addQueryParameter("p", page.toString())
+                      }
+                  }.build()
+
+                  val rb = Request.Builder().url(u)
+                      .header("User-Agent", ua)
+                      .header("Authorization", "Bearer ${s.token}")
+                      .header("Cookie", "mac=${s.mac}")
+                      .build()
+
+                  try {
+                      http.newCall(rb).execute().use { r ->
+                          val js = JSONObject(r.body?.string().orEmpty()).optJSONObject("js") ?: JSONObject()
+                          val arr = js.optJSONArray("data") ?: return emptyList()
+                          val out = mutableListOf<MediaItem>()
+                          for (i in 0 until arr.length()) {
+                              val o = arr.optJSONObject(i) ?: continue
+                              val id = o.optString("id").ifBlank { o.optString("ch_id") }
+                              if (id.isNotBlank()) out.add(MediaItem(id, o.optString("name", o.optString("title", "Untitled")), type, cmd = o.optString("cmd", "")))
+                          }
+                          return out
+                      }
+                  } catch (e: Exception) {
+                      return emptyList()
+                  }
+              }
+
+              fun stream(s: Session, it: MediaItem): String {
+                  if (s.isM3u) return it.cmd
+                  if (it.cmd.startsWith("http")) return it.cmd
+                  
+                  try {
+                      val u = s.portal.toHttpUrl().newBuilder().apply {
+                          addQueryParameter("type", it.type)
+                          addQueryParameter("action", "create_link")
+                          addQueryParameter("cmd", it.cmd)
+                          addQueryParameter("JsHttpRequest", "1-xml")
+                      }.build()
+                      
+                      val rb = Request.Builder().url(u)
+                          .header("User-Agent", ua)
+                          .header("Authorization", "Bearer ${s.token}")
+                          .header("Cookie", "mac=${s.mac}")
+                          .build()
+
+                      http.newCall(rb).execute().use { r ->
+                          val js = JSONObject(r.body?.string().orEmpty()).optJSONObject("js")
+                          var link = js?.optString("cmd", js.optString("url")).orEmpty()
+                          link = link.replace(Regex("^(ffrt\\d*\\s+|ffmpeg\\s+|mpv\\s+|http\\s+)"), "").trim()
+                          
+                          if (link.startsWith("localhost") || link.contains("127.0.0.1")) {
+                              val portalHost = s.portal.toHttpUrl().host
+                              link = link.replaceFirst("localhost", portalHost).replaceFirst("127.0.0.1", portalHost)
+                          }
+                          return link
+                      }
+                  } catch (_: Exception) {}
+                  return ""
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/stb/iptv/MacScanner.kt <<'XEOF'
+          package com.stb.iptv
+
+          import java.util.concurrent.ConcurrentLinkedQueue
+          import java.util.concurrent.CountDownLatch
+          import kotlin.random.Random
+
+          data class Hit(val mac: String, val expiry: String)
+
+          object MacScanner {
+              fun scan(repo: StalkerRepository, portal: String, prefix: String,
+                       count: Int, threads: Int, onHit: (Hit) -> Unit,
+                       onDone: (Int) -> Unit) {
+                  if (portal.endsWith(".m3u") || portal.endsWith(".m3u8")) {
+                      onDone(0)
+                      return
+                  }
+                  val macs = ConcurrentLinkedQueue<String>()
+                  repeat(count) {
+                      macs.add("$prefix:%02X:%02X:%02X".format(
+                          Random.nextInt(256), Random.nextInt(256),
+                          Random.nextInt(256)))
+                  }
+                  val latch = CountDownLatch(threads)
+                  repeat(threads) {
+                      Thread {
+                          while (true) {
+                              val mac = macs.poll() ?: break
+                              try {
+                                  val s = repo.connect(portal, mac)
+                                  onHit(Hit(s.mac, repo.expiry(s)))
+                              } catch (_: Exception) {}
+                          }
+                          latch.countDown()
+                      }.start()
+                  }
+                  Thread { latch.await(); onDone(count - macs.size) }.start()
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/stb/iptv/MainActivity.kt <<'XEOF'
+          package com.stb.iptv
+
+          import android.content.Intent
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.grid.GridCells
+          import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+          import androidx.compose.foundation.lazy.grid.items
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+
+          val DarkBg = Color(0xFF070B14)
+          val SurfaceBg = Color(0xFF1E293B)
+          val ActiveGreen = Color(0xFF10B981)
+          val PremiumBlue = Color(0xFF3B82F6)
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme(colorScheme = darkColorScheme(
+                          primary = PremiumBlue, background = DarkBg, surface = SurfaceBg)) {
+                          Surface(Modifier.fillMaxSize()) {
+                              MainScreen()
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun MainScreen() {
+              val repo = remember { StalkerRepository() }
+              val ctx = LocalContext.current
+              val scope = rememberCoroutineScope()
+
+              var portal by remember { mutableStateOf("http://") }
+              var mac by remember { mutableStateOf("") }
+              var prefix by remember { mutableStateOf("00:1A:79") }
+              var count by remember { mutableStateOf("30") }
+              var status by remember { mutableStateOf("System Ready") }
+              var error by remember { mutableStateOf<String?>(null) }
+              var loading by remember { mutableStateOf(false) }
+              
+              var currentTab by remember { mutableStateOf("LIVE") }
+              var currentPage by remember { mutableStateOf(1) }
+              var searchKeyword by remember { mutableStateOf("") }
+              
+              var session by remember { mutableStateOf<Session?>(null) }
+              var loadedMediaItems by remember { mutableStateOf(listOf<MediaItem>()) }
+              var collectedHits by remember { mutableStateOf(listOf<Hit>()) }
+
+              fun loadDataContent() {
+                  val currentSession = session ?: return
+                  scope.launch {
+                      loading = true; error = null
+                      try {
+                          val targetType = when(currentTab) {
+                              "VOD" -> "vod"
+                              "SERIES" -> "series"
+                              else -> "itv"
+                          }
+                          val incoming = withContext(Dispatchers.IO) {
+                              repo.fetchItems(currentSession, targetType, currentPage)
+                          }
+                          loadedMediaItems = incoming
+                          status = "Displaying ${incoming.size} elements (Page $currentPage)"
+                      } catch (e: Exception) {
+                          error = e.message
+                      } finally { loading = false }
+                  }
+              }
+
+              fun connectPortal() {
+                  scope.launch {
+                      loading = true; error = null; status = "Connecting to entry server..."
+                      try {
+                          val resolvedSession = withContext(Dispatchers.IO) {
+                              repo.connect(portal, mac)
+                          }
+                          val expiration = withContext(Dispatchers.IO) { repo.expiry(resolvedSession) }
+                          session = resolvedSession
+                          status = "Session verified. Expiry: $expiration"
+                          currentPage = 1
+                          loadDataContent()
+                      } catch (e: Exception) {
+                          error = e.message
+                          status = "Connection Failed"
+                      } finally { loading = false }
+                  }
+              }
+
+              fun scanMacAddresses() {
+                  scope.launch {
+                      loading = true; collectedHits = emptyList(); error = null
+                      status = "Scanning MAC prefixes..."
+                      withContext(Dispatchers.IO) {
+                          MacScanner.scan(repo, portal, prefix, count.toIntOrNull() ?: 30, 6,
+                              onHit = { hit -> scope.launch { collectedHits = collectedHits + hit } },
+                              onDone = { _ -> scope.launch { status = "Scan completed. ${collectedHits.size} found"; loading = false } }
+                          )
+                      }
+                  }
+              }
+
+              fun triggerPlayback(item: MediaItem) {
+                  val activeSession = session ?: return
+                  scope.launch {
+                      loading = true; error = null; status = "Requesting link for ${item.name}..."
+                      try {
+                          val streamingUrl = withContext(Dispatchers.IO) {
+                              repo.stream(activeSession, item)
+                          }
+                          if (streamingUrl.isBlank()) throw IllegalStateException("Server rejected link creation")
+                          
+                          val intent = Intent(ctx, PlayerActivity::class.java).apply {
+                              putExtra("url", streamingUrl)
+                              putExtra("title", item.name)
+                          }
+                          ctx.startActivity(intent)
+                          status = "Streaming: ${item.name}"
+                      } catch (e: Exception) {
+                          error = e.message
+                      } finally { loading = false }
+                  }
+              }
+
+              Row(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(DarkBg, Color(0xFF111827))))) {
+                  
+                  // Left Control Dashboard Menu Column Panel
+                  Column(Modifier.width(320.dp).fillMaxHeight().background(SurfaceBg).padding(12.dp),
+                      verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Text("STB PLAYER PRO", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = PremiumBlue)
+                      
+                      Card(colors = CardDefaults.cardColors(containerColor = DarkBg)) {
+                          Column(Modifier.padding(8.dp).fillMaxWidth()) {
+                              Text("Status Log:", fontSize = 11.sp, color = Color.Gray)
+                              Text(status, fontSize = 12.sp, color = ActiveGreen, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                              error?.let { Text(it, fontSize = 12.sp, color = Color.Red) }
+                          }
+                      }
+
+                      OutlinedTextField(portal, { portal = it }, label = { Text("Portal Endpoint / M3U Link") },
+                          modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(fontSize = 13.sp), singleLine = true)
+                      
+                      OutlinedTextField(mac, { mac = it }, label = { Text("MAC Address") },
+                          modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(fontSize = 13.sp), singleLine = true)
+
+                      Button({ connectPortal() }, enabled = !loading, modifier = Modifier.fillMaxWidth(),
+                          shape = RoundedCornerShape(4.dp)) {
+                          if (loading) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White)
+                          else Text("CONNECT PORTAL")
+                      }
+
+                      Divider(color = Color.DarkGray, thickness = 1.dp)
+
+                      Text("Brute-Force MAC Scanner Backend", fontSize = 12.sp, color = Color.LightGray)
+                      Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                          OutlinedTextField(prefix, { prefix = it }, label = { Text("Prefix") }, modifier = Modifier.weight(1.2f), textStyle = TextStyle(fontSize = 12.sp), singleLine = true)
+                          OutlinedTextField(count, { count = it }, label = { Text("Size") }, modifier = Modifier.weight(0.8f), textStyle = TextStyle(fontSize = 12.sp), singleLine = true)
+                      }
+                      
+                      OutlinedButton({ scanMacAddresses() }, enabled = !loading && portal.startsWith("http"), modifier = Modifier.fillMaxWidth(),
+                          shape = RoundedCornerShape(4.dp)) {
+                          Text("SCAN TARGET", fontSize = 12.sp)
+                      }
+
+                      LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                          items(collectedHits) { h ->
+                              Box(Modifier.fillMaxWidth().background(Color(0xFF0F172A)).clickable { mac = h.mac; connectPortal() }.padding(6.dp)) {
+                                  Text("${h.mac} [${h.expiry}]", fontSize = 11.sp, color = Color.White)
+                              }
+                          }
+                      }
+                  }
+
+                  // Main Directory Viewer Column Panel
+                  Column(Modifier.weight(1f).fillMaxHeight().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                          listOf("LIVE", "VOD", "SERIES").forEach { tabLabel ->
+                              Button(
+                                  onClick = { currentTab = tabLabel; currentPage = 1; loadDataContent() },
+                                  colors = ButtonDefaults.buttonColors(containerColor = if (currentTab == tabLabel) PremiumBlue else SurfaceBg),
+                                  modifier = Modifier.weight(1f),
+                                  shape = RoundedCornerShape(6.dp)
+                              ) {
+                                  Text(tabLabel, fontWeight = FontWeight.Bold)
+                              }
+                          }
+                      }
+
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                          OutlinedTextField(
+                              value = searchKeyword,
+                              onValueChange = { searchKeyword = it },
+                              label = { Text("Filter listings by name...") },
+                              modifier = Modifier.weight(1f),
+                              singleLine = true
+                          )
+                          
+                          if (currentTab != "LIVE") {
+                              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                  IconButton(onClick = { if (currentPage > 1) { currentPage--; loadDataContent() } }) {
+                                      Text("◀", color = Color.White)
+                                  }
+                                  Text("Page $currentPage", color = Color.White, fontWeight = FontWeight.Bold)
+                                  IconButton(onClick = { currentPage++; loadDataContent() }) {
+                                      Text("▶", color = Color.White)
+                                  }
+                              }
+                          }
+                      }
+
+                      val filteredList = loadedMediaItems.filter { it.name.contains(searchKeyword, ignoreCase = true) }
+
+                      if (currentTab == "LIVE") {
+                          LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                              items(filteredList) { item ->
+                                  Card(
+                                      modifier = Modifier.fillMaxWidth().clickable { triggerPlayback(item) },
+                                      colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B))
+                                  ) {
+                                      Row(Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                          Text(item.name, color = Color.White, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                                          Text("LIVE CHANNEL", color = ActiveGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                      }
+                                  }
+                              }
+                          }
+                      } else {
+                          LazyVerticalGrid(
+                              columns = GridCells.Fixed(3),
+                              modifier = Modifier.fillMaxSize(),
+                              horizontalArrangement = Arrangement.spacedBy(8.dp),
+                              verticalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              items(filteredList) { item ->
+                                  Card(
+                                      modifier = Modifier.fillMaxWidth().height(70.dp).clickable { triggerPlayback(item) },
+                                      colors = CardDefaults.cardColors(containerColor = Color(0xFF334155))
+                                  ) {
+                                      Box(Modifier.fillMaxSize().padding(8.dp), contentAlignment = Alignment.Center) {
+                                          Text(item.name, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          XEOF
+
+          cat > app/src/main/java/com/stb/iptv/PlayerActivity.kt <<'XEOF'
+          package com.stb.iptv
+
+          import android.os.Bundle
+          import android.view.View
+          import android.view.WindowInsets
+          import android.view.WindowInsetsController
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.viewinterop.AndroidView
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MediaMetadata
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.Player
+          import androidx.media3.datasource.okhttp.OkHttpDataSource
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+          import androidx.media3.ui.AspectRatioFrameLayout
+          import androidx.media3.ui.PlayerView
+
+          class PlayerActivity : ComponentActivity() {
+              private var player: ExoPlayer? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  
+                  // Hide System Bar Components for true fullscreen display output
+                  window.setDecorFitsSystemWindows(false)
+                  window.insetsController?.let { controller ->
+                      controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                      controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                  }
+
+                  val url = intent.getStringExtra("url") ?: ""
+                  val title = intent.getStringExtra("title") ?: "IPTV Stream"
+                  setContent {
+                      MaterialTheme(colorScheme = darkColorScheme()) {
+                          PlayerScreen(url, title)
+                      }
+                  }
+              }
+
+              @Composable
+              private fun PlayerScreen(url: String, title: String) {
+                  var errorMsg by remember { mutableStateOf<String?>(null) }
+                  Box(Modifier.fillMaxSize().background(Color.Black)) {
+                      AndroidView(modifier = Modifier.fillMaxSize(), factory = { c ->
+                          PlayerView(c).apply {
+                              useController = true
+                              
+                              // Force strict 16:9 aspect ratio scaling stretching across entire window layout view bounds
+                              resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                              
+                              val dataSourceFactory = OkHttpDataSource.Factory(okhttp3.OkHttpClient())
+                                  .setUserAgent("Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3")
+                              
+                              val exo = ExoPlayer.Builder(c)
+                                  .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+                                  .build()
+                              
+                              player = exo
+                              exo.setMediaItem(MediaItem.Builder()
+                                  .setUri(url)
+                                  .setMediaMetadata(MediaMetadata.Builder().setTitle(title).build())
+                                  .build())
+                              
+                              exo.addListener(object : Player.Listener {
+                                  override fun onPlayerError(e: PlaybackException) {
+                                      errorMsg = "${e.errorCodeName}: ${e.message}"
+                                  }
+                              })
+                              exo.prepare()
+                              exo.playWhenReady = true
+                          }
+                      })
+                      
+                      Text(title, color = Color.White.copy(alpha = 0.6f), modifier = Modifier
+                          .align(Alignment.TopStart).padding(16.dp))
+                      
+                      errorMsg?.let {
+                          Text(it, color = Color.Red, modifier = Modifier
+                              .align(Alignment.Center).padding(16.dp))
+                      }
+                      
+                      DisposableEffect(Unit) {
+                          onDispose { player?.release(); player = null }
+                      }
+                  }
+              }
+
+              override fun onStop() { super.onStop(); player?.pause() }
+              override fun onDestroy() {
+                  player?.release(); player = null; super.onDestroy()
+              }
+          }
+          XEOF
+
+          echo "project successfully updated to professional player layer configuration specifications"
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stalker-iptv-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
