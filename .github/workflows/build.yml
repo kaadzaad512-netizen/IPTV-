@@ -135,7 +135,7 @@ jobs:
           import okhttp3.HttpUrl.Companion.toHttpUrl
           import okhttp3.OkHttpClient
           import okhttp3.Request
-          import androidx.compose.ui.text.TextStyle
+          
           import org.json.JSONObject
           import java.io.IOException
           import java.net.URLEncoder
@@ -373,6 +373,7 @@ jobs:
 
           import android.content.Intent
           import android.os.Bundle
+          import androidx.compose.ui.text.TextStyle
           import androidx.activity.ComponentActivity
           import androidx.activity.compose.setContent
           import androidx.compose.foundation.background
