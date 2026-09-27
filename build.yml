@@ -1,0 +1,450 @@
+name: Build Stalker IPTV APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Create project
+        run: |
+          mkdir -p app/src/main/java/com/example/stalkeriptv
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name="StalkerIPTV"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.stalkeriptv'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.stalkeriptv'
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName '1.0'
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme"
+                  parent="android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#7c9cff</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+
+              <application
+                  android:theme="@style/AppTheme"
+                  android:label="Stalker IPTV"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/stalkeriptv/MainActivity.java <<'EOF'
+          package com.example.stalkeriptv;
+
+          import android.app.*;
+          import android.os.*;
+          import android.content.*;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.net.*;
+          import java.util.*;
+          import org.json.*;
+
+          public class MainActivity extends Activity {
+
+              LinearLayout root,list;
+              EditText portal,mac;
+              TextView status;
+              Client client;
+
+              int dp(int x) {
+                  return (int)(x * getResources()
+                      .getDisplayMetrics().density + .5f);
+              }
+
+              TextView text(String s) {
+                  TextView v=new TextView(this);
+                  v.setText(s);
+                  v.setTextColor(Color.WHITE);
+                  v.setTextSize(16);
+                  v.setPadding(dp(12),dp(12),dp(12),dp(12));
+                  return v;
+              }
+
+              public void onCreate(Bundle b) {
+                  super.onCreate(b);
+
+                  root=new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(10),dp(10),dp(10),dp(10));
+                  root.setBackgroundColor(Color.rgb(16,18,22));
+
+                  portal=new EditText(this);
+                  portal.setHint("Portal URL");
+                  portal.setTextColor(Color.WHITE);
+
+                  mac=new EditText(this);
+                  mac.setHint("Authorized MAC");
+                  mac.setTextColor(Color.WHITE);
+
+                  Button connect=new Button(this);
+                  connect.setText("CONNECT");
+
+                  status=text("Enter an authorized portal and MAC.");
+
+                  Button live=new Button(this);
+                  live.setText("LIVE");
+
+                  Button vod=new Button(this);
+                  vod.setText("VOD");
+
+                  Button series=new Button(this);
+                  series.setText("SERIES");
+
+                  list=new LinearLayout(this);
+                  list.setOrientation(LinearLayout.VERTICAL);
+
+                  ScrollView scroll=new ScrollView(this);
+                  scroll.addView(list);
+
+                  root.addView(portal);
+                  root.addView(mac);
+                  root.addView(connect);
+                  root.addView(status);
+                  root.addView(live);
+                  root.addView(vod);
+                  root.addView(series);
+                  root.addView(scroll,
+                      new LinearLayout.LayoutParams(-1,0,1));
+
+                  setContentView(root);
+
+                  connect.setOnClickListener(v -> connect());
+
+                  live.setOnClickListener(v -> load("live"));
+                  vod.setOnClickListener(v -> load("vod"));
+                  series.setOnClickListener(v -> load("series"));
+              }
+
+              void connect() {
+                  String p=portal.getText().toString().trim();
+                  String m=mac.getText().toString().trim();
+
+                  if(p.isEmpty() || m.isEmpty()) {
+                      status.setText("Portal and MAC required.");
+                      return;
+                  }
+
+                  status.setText("Handshake...");
+
+                  new Thread(() -> {
+                      try {
+                          client=new Client(p,m);
+                          client.handshake();
+
+                          runOnUiThread(() ->
+                              status.setText("Connected - handshake OK"));
+
+                          load("live");
+
+                      } catch(Exception e) {
+                          runOnUiThread(() ->
+                              status.setText("Error: "+e.getMessage()));
+                      }
+                  }).start();
+              }
+
+              void load(String type) {
+                  if(client==null) {
+                      status.setText("Connect first.");
+                      return;
+                  }
+
+                  new Thread(() -> {
+                      try {
+                          ArrayList<JSONObject> a;
+
+                          if(type.equals("live"))
+                              a=client.channels();
+                          else if(type.equals("vod"))
+                              a=client.vod();
+                          else
+                              a=client.series();
+
+                          runOnUiThread(() -> showItems(a));
+
+                      } catch(Exception e) {
+                          runOnUiThread(() ->
+                              status.setText("Error: "+e.getMessage()));
+                      }
+                  }).start();
+              }
+
+              void showItems(ArrayList<JSONObject> a) {
+                  list.removeAllViews();
+                  status.setText(a.size()+" items");
+
+                  for(JSONObject o:a) {
+                      String name=o.optString("name",
+                          o.optString("title","Untitled"));
+
+                      TextView v=text(name);
+                      list.addView(v);
+
+                      v.setOnClickListener(x -> playItem(o));
+                  }
+              }
+
+              void playItem(JSONObject o) {
+                  new Thread(() -> {
+                      try {
+                          String id=o.optString("id",
+                              o.optString("movie_id"));
+
+                          String url=client.liveLink(id);
+
+                          runOnUiThread(() -> {
+                              Intent i=new Intent(Intent.ACTION_VIEW);
+                              i.setDataAndType(Uri.parse(url),"video/*");
+                              startActivity(i);
+                          });
+
+                      } catch(Exception e) {
+                          runOnUiThread(() ->
+                              status.setText("Playback error"));
+                      }
+                  }).start();
+              }
+          }
+
+          class Client {
+
+              String base,mac,token="";
+
+              Client(String p,String m) {
+                  base=p.replaceAll("/+$","");
+                  if(!base.endsWith("portal.php"))
+                      base+="/portal.php";
+                  mac=m.toUpperCase();
+              }
+
+              JSONObject get(Map<String,String> p) throws Exception {
+
+                  StringBuilder s=new StringBuilder(base+"?");
+
+                  for(Map.Entry<String,String> e:p.entrySet()) {
+                      if(s.charAt(s.length()-1)!='?')
+                          s.append("&");
+
+                      s.append(URLEncoder.encode(e.getKey(),"UTF-8"));
+                      s.append("=");
+                      s.append(URLEncoder.encode(e.getValue(),"UTF-8"));
+                  }
+
+                  HttpURLConnection c=(HttpURLConnection)
+                      new URL(s.toString()).openConnection();
+
+                  c.setConnectTimeout(10000);
+                  c.setReadTimeout(15000);
+
+                  c.setRequestProperty(
+                      "User-Agent","Mozilla/5.0");
+
+                  c.setRequestProperty(
+                      "X-User-Agent",
+                      "Model: MAG250; Link: WiFi");
+
+                  c.setRequestProperty(
+                      "Cookie",
+                      "mac="+mac+
+                      "; stb_lang=en; timezone=Europe/London");
+
+                  if(!token.isEmpty())
+                      c.setRequestProperty(
+                          "Authorization","Bearer "+token);
+
+                  if(c.getResponseCode()!=200)
+                      throw new IOException(
+                          "HTTP "+c.getResponseCode());
+
+                  BufferedReader r=new BufferedReader(
+                      new InputStreamReader(c.getInputStream()));
+
+                  StringBuilder out=new StringBuilder();
+                  String line;
+
+                  while((line=r.readLine())!=null)
+                      out.append(line);
+
+                  return new JSONObject(out.toString());
+              }
+
+              Map<String,String> p(
+                  String type,String action) {
+
+                  HashMap<String,String> x=new HashMap<>();
+
+                  x.put("type",type);
+                  x.put("action",action);
+                  x.put("JsHttpRequest","1-xml");
+
+                  return x;
+              }
+
+              void handshake() throws Exception {
+
+                  JSONObject x=get(p("stb","handshake"));
+
+                  JSONObject j=x.optJSONObject("js");
+
+                  if(j==null)
+                      throw new IOException("Invalid handshake");
+
+                  token=j.optString("token","");
+                  token=token.replaceFirst("^~","");
+
+                  if(token.isEmpty())
+                      throw new IOException("No token returned");
+              }
+
+              ArrayList<JSONObject> arr(JSONObject x) {
+
+                  ArrayList<JSONObject> r=new ArrayList<>();
+                  Object j=x.opt("js");
+
+                  if(j instanceof JSONArray) {
+                      JSONArray a=(JSONArray)j;
+
+                      for(int i=0;i<a.length();i++)
+                          r.add(a.optJSONObject(i));
+                  }
+
+                  return r;
+              }
+
+              ArrayList<JSONObject> channels()
+                  throws Exception {
+
+                  return arr(get(p("itv","get_all_channels")));
+              }
+
+              ArrayList<JSONObject> vod()
+                  throws Exception {
+
+                  Map<String,String> x=
+                      p("vod","get_ordered_list");
+
+                  x.put("p","1");
+
+                  return arr(get(x));
+              }
+
+              ArrayList<JSONObject> series()
+                  throws Exception {
+
+                  Map<String,String> x=
+                      p("series","get_ordered_list");
+
+                  x.put("p","1");
+
+                  return arr(get(x));
+              }
+
+              String liveLink(String id)
+                  throws Exception {
+
+                  Map<String,String> x=
+                      p("itv","create_link");
+
+                  x.put("cmd",
+                      "ffmpeg http://localhost/ch/"+id);
+
+                  JSONObject j=get(x).optJSONObject("js");
+
+                  if(j==null)return "";
+
+                  return j.optString("cmd",
+                      j.optString("url",""))
+                      .replaceFirst(
+                          "^(ffmpeg|vlc)\\s+","");
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: |
+          gradle --version
+          gradle assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: StalkerIPTV-debug
+          path: app/build/outputs/apk/debug/*.apk
